@@ -2952,6 +2952,14 @@ def resolve_skin() -> dict:
         return {}
 
 
+def gateway_ready_payload() -> dict:
+    return {
+        "capabilities": ["message.interim.v1", "inflight.interim.v1"],
+        "change_events": True,
+        "skin": resolve_skin(),
+    }
+
+
 # Signature of the last skin broadcast: (name, active user-file mtime). Lets the
 # per-tool reconcile fire ``skin.changed`` on any real move — a name switch OR a
 # live color edit to the active skin — and nothing else.
@@ -5330,6 +5338,26 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _on_interim_assistant(
+    sid: str, text: Any, *, already_streamed: bool = False
+) -> None:
+    payload = {
+        "already_streamed": bool(already_streamed),
+        "segment_id": uuid.uuid4().hex,
+        "text": str(text),
+    }
+    session = _sessions.get(sid)
+    if session is not None:
+        lock = session.get("history_lock")
+        if lock is not None:
+            with lock:
+                turn = session.get("inflight_turn")
+                if isinstance(turn, dict):
+                    turn.setdefault("interim", []).append(dict(payload))
+                    turn["updated_at"] = time.time()
+    _emit("message.interim", sid, payload)
+
+
 def _agent_cbs(sid: str) -> dict:
     callbacks = {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -5405,10 +5433,8 @@ def _agent_cbs(sid: str) -> dict:
     # this, and the finally block clears it so a stale closure can't fire.
     if _load_interim_assistant_messages():
         callbacks["interim_assistant_callback"] = (
-            lambda text, *, already_streamed=False: _emit(
-                "message.interim",
-                sid,
-                {"text": str(text), "already_streamed": bool(already_streamed)},
+            lambda text, *, already_streamed=False: _on_interim_assistant(
+                sid, text, already_streamed=already_streamed
             )
         )
 
@@ -7198,7 +7224,22 @@ def _inflight_snapshot(session: dict) -> dict | None:
     assistant = str(turn.get("assistant") or "")
     streaming = bool(turn.get("streaming"))
     error = str(turn.get("error") or "").strip()
-    if not user and not assistant and not streaming and not error:
+    interim = []
+    for raw in turn.get("interim") or []:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get("segment_id") or "").strip()
+        text = str(raw.get("text") or "")
+        if not segment_id or not text:
+            continue
+        interim.append(
+            {
+                "already_streamed": bool(raw.get("already_streamed")),
+                "segment_id": segment_id,
+                "text": text,
+            }
+        )
+    if not user and not assistant and not streaming and not error and not interim:
         return None
     snapshot = {
         "assistant": assistant,
@@ -7210,6 +7251,8 @@ def _inflight_snapshot(session: dict) -> dict | None:
         # Mid-turn redirects. Carried alongside the original prompt (not over
         # it) so resume can rebuild every user bubble the turn produced.
         snapshot["corrections"] = [str(c) for c in corrections]
+    if interim:
+        snapshot["interim"] = interim
     if error:
         # Retained failed turn (see _fail_inflight_turn): carry the error
         # semantics so a resuming client can rebuild the failed-turn bubble
