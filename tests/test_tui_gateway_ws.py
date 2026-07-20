@@ -14,6 +14,7 @@ def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
     _make_agent's wait_for_mcp_discovery no-ops and the agent snapshots an
     MCP-less tool list. Regression test for #38945."""
     calls = []
+    frames = []
     monkeypatch.setattr(
         mcp_startup,
         "start_background_mcp_discovery",
@@ -25,7 +26,7 @@ def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
             pass
 
         async def send_text(self, line):
-            pass
+            frames.append(server.json.loads(line))
 
         async def receive_text(self):
             raise ws_mod._WebSocketDisconnect()
@@ -40,6 +41,10 @@ def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
         server._sessions.clear()
 
     assert calls == [{"logger": ws_mod._log, "thread_name": "tui-ws-mcp-discovery"}]
+    assert frames[0]["params"]["payload"]["capabilities"] == [
+        "message.interim.v1",
+        "inflight.interim.v1",
+    ]
 
 
 def _run_disconnect(monkeypatch, seed):

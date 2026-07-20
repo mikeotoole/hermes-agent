@@ -19,7 +19,7 @@ import traceback
 from tui_gateway._stdin_recovery import handle_spurious_eof
 
 from tui_gateway import server
-from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
+from tui_gateway.server import _CRASH_LOG, dispatch, write_json
 from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
@@ -355,7 +355,7 @@ def main():
     if not write_json({
         "jsonrpc": "2.0",
         "method": "event",
-        "params": {"type": "gateway.ready", "payload": {"skin": resolve_skin()}},
+        "params": {"type": "gateway.ready", "payload": server.gateway_ready_payload()},
     }):
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)

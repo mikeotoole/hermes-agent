@@ -2410,6 +2410,13 @@ def resolve_skin() -> dict:
         return {}
 
 
+def gateway_ready_payload() -> dict:
+    return {
+        "capabilities": ["message.interim.v1", "inflight.interim.v1"],
+        "skin": resolve_skin(),
+    }
+
+
 def _resolve_model() -> str:
     env = (
         os.environ.get("HERMES_MODEL", "")
@@ -4320,6 +4327,26 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _on_interim_assistant(
+    sid: str, text: Any, *, already_streamed: bool = False
+) -> None:
+    payload = {
+        "already_streamed": bool(already_streamed),
+        "segment_id": uuid.uuid4().hex,
+        "text": str(text),
+    }
+    session = _sessions.get(sid)
+    if session is not None:
+        lock = session.get("history_lock")
+        if lock is not None:
+            with lock:
+                turn = session.get("inflight_turn")
+                if isinstance(turn, dict):
+                    turn.setdefault("interim", []).append(dict(payload))
+                    turn["updated_at"] = time.time()
+    _emit("message.interim", sid, payload)
+
+
 def _agent_cbs(sid: str) -> dict:
     callbacks = {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -4383,10 +4410,8 @@ def _agent_cbs(sid: str) -> dict:
     # this, and the finally block clears it so a stale closure can't fire.
     if _load_interim_assistant_messages():
         callbacks["interim_assistant_callback"] = (
-            lambda text, *, already_streamed=False: _emit(
-                "message.interim",
-                sid,
-                {"text": str(text), "already_streamed": bool(already_streamed)},
+            lambda text, *, already_streamed=False: _on_interim_assistant(
+                sid, text, already_streamed=already_streamed
             )
         )
 
@@ -5735,13 +5760,31 @@ def _inflight_snapshot(session: dict) -> dict | None:
     user = str(turn.get("user") or "").strip()
     assistant = str(turn.get("assistant") or "")
     streaming = bool(turn.get("streaming"))
-    if not user and not assistant and not streaming:
+    interim = []
+    for raw in turn.get("interim") or []:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get("segment_id") or "").strip()
+        text = str(raw.get("text") or "")
+        if not segment_id or not text:
+            continue
+        interim.append(
+            {
+                "already_streamed": bool(raw.get("already_streamed")),
+                "segment_id": segment_id,
+                "text": text,
+            }
+        )
+    if not user and not assistant and not streaming and not interim:
         return None
-    return {
+    snapshot = {
         "assistant": assistant,
         "streaming": streaming,
         "user": user,
     }
+    if interim:
+        snapshot["interim"] = interim
+    return snapshot
 
 
 def _queued_prompt_snapshot(session: dict) -> dict | None:

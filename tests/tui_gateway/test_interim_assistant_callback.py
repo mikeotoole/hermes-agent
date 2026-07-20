@@ -103,3 +103,44 @@ def test_agent_cbs_interim_callback_passes_already_streamed_false():
 
     assert emitted[0][2]["already_streamed"] is False
     assert emitted[0][2]["text"] == "interim text"
+
+
+def test_agent_cbs_snapshots_interim_boundaries_for_reconnect():
+    from tui_gateway import server
+
+    sid = "reconnect-session"
+    inflight_turn = {"assistant": "", "streaming": True, "user": "prompt"}
+    server._sessions[sid] = {
+        "history_lock": server.threading.RLock(),
+        "inflight_turn": inflight_turn,
+        "running": True,
+    }
+    emitted: list[tuple] = []
+
+    try:
+        with patch("tui_gateway.server._load_cfg", return_value={}), \
+             patch("tui_gateway.server._emit", side_effect=lambda event, session, payload=None: emitted.append((event, session, payload))):
+            callback = server._agent_cbs(sid)["interim_assistant_callback"]
+            callback("not streamed", already_streamed=False)
+            callback("already streamed", already_streamed=True)
+
+        payloads = [event[2] for event in emitted]
+        assert [payload["already_streamed"] for payload in payloads] == [False, True]
+        assert [payload["text"] for payload in payloads] == ["not streamed", "already streamed"]
+        assert all(isinstance(payload["segment_id"], str) and payload["segment_id"] for payload in payloads)
+        assert payloads[0]["segment_id"] != payloads[1]["segment_id"]
+        assert server._inflight_snapshot(server._sessions[sid])["interim"] == payloads
+        assert server._sessions[sid]["inflight_turn"] is inflight_turn
+        assert server._sessions[sid]["running"] is True
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_gateway_ready_payload_advertises_interim_contracts():
+    from tui_gateway import server
+
+    with patch("tui_gateway.server.resolve_skin", return_value={"name": "test"}):
+        assert server.gateway_ready_payload() == {
+            "capabilities": ["message.interim.v1", "inflight.interim.v1"],
+            "skin": {"name": "test"},
+        }
