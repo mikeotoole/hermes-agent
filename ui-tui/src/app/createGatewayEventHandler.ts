@@ -948,9 +948,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'message.interim': {
         const text = ev.payload?.text
+        const segmentId = typeof ev.payload?.segment_id === 'string' ? ev.payload.segment_id.trim() : ''
+        const alreadyStreamed = ev.payload?.already_streamed !== false
 
         if (typeof text === 'string' && text.trim()) {
-          turnController.recordInterimMessage(text)
+          turnController.recordInterimMessage(text, segmentId || undefined, alreadyStreamed)
         }
 
         return

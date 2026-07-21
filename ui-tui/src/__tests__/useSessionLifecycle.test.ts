@@ -68,6 +68,28 @@ describe('live session activation in-flight state', () => {
     expect(getTurnState().streaming).toBe('partial answer')
   })
 
+  it('hydrates stable interim boundaries and leaves only the unsealed assistant tail streaming', () => {
+    const inflight = {
+      assistant: 'streamed checkpointremaining answer',
+      streaming: true,
+      user: 'current prompt',
+      interim: [
+        { already_streamed: true, segment_id: 'stable-1', text: 'streamed checkpoint' },
+        { already_streamed: false, segment_id: 'stable-2', text: 'tool-call commentary' }
+      ]
+    }
+
+    hydrateLiveSessionInflight(inflight)
+    turnController.recordInterimMessage('streamed checkpoint', 'stable-1', true)
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+      'streamed checkpoint',
+      'tool-call commentary'
+    ])
+    expect(turnController.bufRef).toBe('remaining answer')
+    expect(getTurnState().streaming).toBe('remaining answer')
+  })
+
   it('ignores empty in-flight payloads', () => {
     expect(liveSessionInflightMessages({ assistant: '', streaming: false, user: '   ' })).toEqual([])
 

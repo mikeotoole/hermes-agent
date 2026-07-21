@@ -58,11 +58,44 @@ export const liveSessionInflightMessages = (inflight?: null | SessionInflightTur
   return user ? [{ role: 'user', text: user }] : []
 }
 
-export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
-  const assistant = String(inflight?.assistant ?? '')
+interface LiveInterimBoundary {
+  alreadyStreamed: boolean
+  segmentId: string
+  text: string
+}
 
-  if (!assistant && !inflight?.streaming) {
+export const liveSessionInterimBoundaries = (inflight?: null | SessionInflightTurn): LiveInterimBoundary[] => {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const boundary = raw as Record<string, unknown>
+        const segmentId = typeof boundary.segment_id === 'string' ? boundary.segment_id.trim() : ''
+        const text = typeof boundary.text === 'string' ? boundary.text : ''
+
+        return segmentId && text ? [{ alreadyStreamed: Boolean(boundary.already_streamed), segmentId, text }] : []
+      })
+    : []
+}
+
+export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
+  let assistant = String(inflight?.assistant ?? '')
+  const interim = liveSessionInterimBoundaries(inflight)
+
+  if (!assistant && !inflight?.streaming && !interim.length) {
     return
+  }
+
+  for (const boundary of interim) {
+    turnController.recordInterimMessage(boundary.text, boundary.segmentId, boundary.alreadyStreamed)
+
+    if (boundary.alreadyStreamed && assistant.startsWith(boundary.text)) {
+      assistant = assistant.slice(boundary.text.length)
+    }
   }
 
   turnController.hydrateStreamingText(assistant)

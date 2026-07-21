@@ -125,6 +125,7 @@ class TurnController {
 
   private activeTools: ActiveTool[] = []
   private activeReasoningText = ''
+  private interimSegmentIds = new Set<string>()
   private reasoningSegmentIndex: null | number = null
   private interimBoundaryIndex: null | number = null
   private activityId = 0
@@ -274,6 +275,7 @@ class TurnController {
     this.activeTools = []
     this.streamTimer = clear(this.streamTimer)
     this.bufRef = ''
+    this.interimSegmentIds.clear()
     this.pendingSegmentTools = []
     this.segmentMessages = []
 
@@ -686,21 +688,30 @@ class TurnController {
     }
   }
 
-  recordInterimMessage(text: string) {
+  recordInterimMessage(text: string, segmentId?: string, alreadyStreamed = true) {
     if (this.interrupted) {
       return
     }
 
     const authoritativeText = text.trimStart()
+    const stableSegmentId = segmentId?.trim() ?? ''
 
     if (!authoritativeText) {
       return
     }
 
+    if (stableSegmentId && this.interimSegmentIds.has(stableSegmentId)) {
+      return
+    }
+
+    if (!alreadyStreamed && this.bufRef.trimStart()) {
+      this.flushStreamingSegment()
+    }
+
     // If the streaming buffer hasn't caught up to the authoritative interim
     // text (e.g. the backend didn't stream every token), sync it so the
     // sealed segment matches what the user should see.
-    if (this.bufRef.trimStart() !== authoritativeText) {
+    if (!alreadyStreamed || this.bufRef.trimStart() !== authoritativeText) {
       this.bufRef = authoritativeText
     }
 
@@ -709,6 +720,11 @@ class TurnController {
     // segment survives message.complete's finalTail dedupe because
     // interimBoundaryIndex marks it as interim-sealed.
     this.flushStreamingSegment()
+
+    if (stableSegmentId) {
+      this.interimSegmentIds.add(stableSegmentId)
+    }
+
     this.interimBoundaryIndex = this.segmentMessages.length
   }
 
@@ -981,6 +997,7 @@ class TurnController {
     this.clearReasoning()
     this.activeTools = []
     this.activeReasoningText = ''
+    this.interimSegmentIds.clear()
     this.reasoningSegmentIndex = null
     this.interimBoundaryIndex = null
     this.turnTools = []
