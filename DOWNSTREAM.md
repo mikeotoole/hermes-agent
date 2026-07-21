@@ -4,10 +4,10 @@ This fork is a thin integration and release vehicle for temporary Hermes core ch
 
 ## Branches
 
-- `main` is an exact fast-forward-only mirror of `NousResearch/hermes-agent:main`. It receives no local commits.
+- `main` may be maintained as an exact fast-forward-only mirror of `NousResearch/hermes-agent:main`. It receives no local commits, but mirror freshness is not a downstream release gate.
 - `downstream/main` is the protected integration branch. Local releases are cut only from reviewed commits on this branch.
-- `fix/*` and `feat/*` branches contain one upstreamable change each and start from a pinned `upstream/main` commit.
-- `sync/upstream-<short-sha>` branches are disposable update candidates used to replay the carried patch stack against a new upstream base.
+- `fix/*` and `feat/*` branches contain one upstreamable change each and start from a pinned official release tag or an explicitly recorded accepted base.
+- `release/lagoon-*` branches package an already reviewed downstream head with governance-only release metadata before promotion.
 
 ## Remotes and local safety
 
@@ -18,22 +18,29 @@ The canonical development clone uses:
 
 Local Git is configured with `pull.ff=only`, fetch pruning, and `origin` as the push default. The installed Hermes runtime is not a development clone and must not own development worktrees.
 
-## Upstream sync
+## Upstream release baseline
 
-Run the local `git sync-upstream` alias from the canonical development clone. It must:
+Downstream releases pin to an official NousResearch release tag. Moving upstream `main` does not invalidate an already reviewed and accepted downstream artifact.
 
-1. fetch and prune `upstream`;
-2. fast-forward local `main` to `upstream/main`;
-3. push that exact fast-forward to `origin/main`;
-4. stop on divergence or any non-fast-forward condition.
+1. Record the selected upstream release tag and its dereferenced commit.
+2. Preserve the accepted downstream code head unchanged through packaging.
+3. Migrate the carried patch stack only when Mike intentionally selects a newer official release tag.
+4. Treat that migration as a new compatibility, test, freeze, and independent-review tranche.
 
-Never merge or rebase local changes onto fork `main`.
+Fork `main` may be synced separately by exact fast-forward only. Never merge or rebase local changes onto fork `main`, and never chase unreleased `main` as a prerequisite for a downstream release.
+
+## Current release candidate
+
+- Upstream version line: Hermes Agent v0.19.0, official tag `v2026.7.20`.
+- Accepted downstream code head: `e2f27bcdbf491bb367b4f8a0fd2863efa6bb4a7e`.
+- Accepted behavior: ordered OpenAI commentary during tool calls, reconnect survival, and AgentCTRL compatibility.
+- Packaging may add only reviewed governance/release metadata. Runtime-source bytes must remain identical to the accepted code head.
 
 ## Patch lifecycle
 
 Every carried core patch needs an external patch-ledger entry recording:
 
-- upstream base SHA;
+- selected official upstream release tag plus the exact accepted base SHA;
 - local branch and commit;
 - why the core change cannot live in a plugin/skill/MCP server;
 - upstream issue and pull request;
@@ -41,7 +48,7 @@ Every carried core patch needs an external patch-ledger entry recording:
 - focused, neighboring, full, integration, and review evidence;
 - removal condition.
 
-When upstream lands equivalent behavior, prove the downstream commit can be removed, remove it on the next sync candidate, and rerun all affected gates.
+When a newer official upstream release lands equivalent behavior, prove the downstream commit can be removed, remove it on that tagged-release migration candidate, and rerun all affected gates.
 
 ## Promotion gate
 
@@ -60,7 +67,7 @@ Conflicted upstream updates and failed checks never auto-merge or auto-deploy.
 ## Releases and rollback
 
 - Tag reviewed releases as `lagoon/YYYY.MM.DD.N`.
-- Record the upstream base SHA and ordered downstream commits in the release notes.
+- Record the selected upstream release tag, exact accepted base SHA, and ordered downstream commits in the release notes.
 - Build immutable artifacts/images from the tag and deploy by digest or artifact hash.
 - Roll back by selecting the previous verified tag/digest; never reconstruct a production build from an untagged branch.
 
