@@ -405,16 +405,23 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string) => {
+    (sessionId: string, text: string, segmentId?: string, alreadyStreamed = true) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
         }
 
         const authoritativeText = renderMediaTags(text).trim()
+        const stableMessageId = segmentId ? `assistant-interim-${segmentId}` : null
 
         if (!authoritativeText) {
           return state
+        }
+
+        if (stableMessageId && state.messages.some(message => message.id === stableMessageId)) {
+          return state.interimBoundaryPending
+            ? state
+            : { ...state, interimBoundaryPending: true, sawAssistantPayload: true }
         }
 
         const streamId = state.streamId
@@ -427,18 +434,35 @@ export function useMessageStream({
 
         let nextMessages = state.messages
 
-        if (streamId && nextMessages.some(m => m.id === streamId)) {
-          // Seal the streaming bubble in place, marked interim so it renders
-          // without an action footer (see ChatMessage.interim).
+        const hasStreamMessage = Boolean(streamId && nextMessages.some(m => m.id === streamId))
+
+        if (streamId && hasStreamMessage && alreadyStreamed) {
+          // Seal the existing streaming bubble in place with the stable
+          // reconnect identity supplied by the gateway.
           nextMessages = nextMessages.map(m =>
-            m.id === streamId ? { ...m, parts: replaceTextPart(m.parts), pending: false, interim: true } : m
+            m.id === streamId
+              ? {
+                  ...m,
+                  ...(stableMessageId ? { id: stableMessageId } : {}),
+                  parts: replaceTextPart(m.parts),
+                  pending: false,
+                  interim: true
+                }
+              : m
           )
         } else {
-          // No streaming bubble — create a standalone interim message
+          // Commentary that was not emitted through message.delta is its own
+          // boundary. Preserve any preceding stream instead of replacing it.
+          if (streamId && hasStreamMessage) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId ? { ...message, pending: false } : message
+            )
+          }
+
           nextMessages = [
             ...nextMessages,
             {
-              id: nextStreamMessageId('assistant-interim'),
+              id: stableMessageId ?? nextStreamMessageId('assistant-interim'),
               role: 'assistant' as const,
               parts: [assistantTextPart(authoritativeText)],
               pending: false,

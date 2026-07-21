@@ -426,6 +426,36 @@ export function preserveLocalPendingTurnMessages(
   return preserved.length ? [...nextMessages, ...preserved] : nextMessages
 }
 
+
+interface LiveInterimSegment {
+  alreadyStreamed: boolean
+  segmentId: string
+  text: string
+}
+
+function liveInterimSegments(inflight: SessionResumeResponse['inflight']): LiveInterimSegment[] {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const segment = raw as Record<string, unknown>
+
+        const segmentId = typeof segment.segment_id === 'string' ? segment.segment_id.trim() : ''
+        const text = typeof segment.text === 'string' ? segment.text : ''
+
+        return segmentId && text ? [{ alreadyStreamed: Boolean(segment.already_streamed), segmentId, text }] : []
+      })
+    : []
+}
+
+export function hasLiveInterimProjection(inflight: SessionResumeResponse['inflight']): boolean {
+  return liveInterimSegments(inflight).length > 0
+}
+
 /**
  * Append the backend-only tail of a live turn to a stored transcript.
  *
@@ -440,7 +470,7 @@ export function appendLiveSessionProjection(
   projection: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>
 ): ChatMessage[] {
   const inflightUser = projection.inflight?.user?.trim() ?? ''
-  const inflightAssistant = projection.inflight?.assistant ?? ''
+  let inflightAssistant = projection.inflight?.assistant ?? ''
   const inflightStreaming = Boolean(projection.inflight?.streaming)
 
   // Mid-turn redirect corrections. They are additional user bubbles belonging
@@ -454,6 +484,7 @@ export function appendLiveSessionProjection(
   // failure on the projected row instead of rendering the partial as healthy.
   const inflightError = projection.inflight?.error?.trim() ?? ''
   const queuedUser = projection.queued?.user?.trim() ?? ''
+  const inflightInterim = liveInterimSegments(projection.inflight)
 
   if (
     !inflightUser &&
@@ -461,13 +492,33 @@ export function appendLiveSessionProjection(
     !inflightStreaming &&
     !inflightError &&
     !queuedUser &&
-    !inflightCorrections.length
+    !inflightCorrections.length &&
+    !inflightInterim.length
   ) {
     return messages
   }
 
   const sessionId = projection.session_id || 'session'
   const projected: ChatMessage[] = []
+<<<<<<< HEAD
+=======
+  let assistantCursor = 0
+  let streamChunkIndex = 0
+
+  const pushStreamChunk = (text: string) => {
+    if (!text) {
+      return
+    }
+
+    projected.push({
+      id: `assistant-stream-${sessionId}-${streamChunkIndex++}`,
+      role: 'assistant',
+      parts: [assistantTextPart(text)],
+      pending: false
+    })
+  }
+
+>>>>>>> 270a9d931 (fixup! fix(desktop): restore interim reconnect boundaries)
   // A turn normally persists its user row before inference begins. session.resume
   // then returns that stored row *and* the still-live inflight projection; adding
   // both makes a backgrounded prompt appear twice when its session is reopened.
@@ -510,6 +561,20 @@ export function appendLiveSessionProjection(
       role: 'user',
       parts: [textPart(correction)]
     })
+  }
+
+  for (const segment of inflightInterim) {
+    projected.push({
+      id: `assistant-interim-${segment.segmentId}`,
+      role: 'assistant',
+      parts: [assistantTextPart(segment.text)],
+      pending: false,
+      interim: true
+    })
+
+    if (segment.alreadyStreamed && inflightAssistant.startsWith(segment.text)) {
+      inflightAssistant = inflightAssistant.slice(segment.text.length)
+    }
   }
 
   // Keep a pending assistant boundary even before the first delta when a
