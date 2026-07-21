@@ -11,6 +11,7 @@ import {
   chatMessageArraysEquivalent,
   chatMessagesEquivalent,
   chatPartsEquivalent,
+  hasLiveInterimProjection,
   isSessionGoneError,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
@@ -330,6 +331,19 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('rejects malformed interim records for boundary state', () => {
+    expect(
+      hasLiveInterimProjection({
+        interim: [{ segment_id: '', text: 'missing id' }, { segment_id: 'missing-text' }, null as never]
+      })
+    ).toBe(false)
+    expect(
+      hasLiveInterimProjection({
+        interim: [{ segment_id: 'stable-1', text: 'checkpoint' }]
+      })
+    ).toBe(true)
+  })
+
   it('restores the running turn and accepted queued prompt after a renderer restart', () => {
     const stored = [msg('stored-user', 'user', 'earlier'), msg('stored-assistant', 'assistant', 'earlier answer')]
 
@@ -352,6 +366,45 @@ describe('appendLiveSessionProjection', () => {
       'newest prompt'
     ])
     expect(restored[3]).toMatchObject({ id: 'assistant-stream-runtime-1', pending: true })
+  })
+
+  it('restores stable interim boundaries without duplicating streamed text', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        user: 'current prompt',
+        assistant: 'streamed checkpointremaining answer',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-1',
+            text: 'streamed checkpoint',
+            already_streamed: true
+          },
+          {
+            segment_id: 'stable-2',
+            text: 'tool-call commentary',
+            already_streamed: false
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.id)).toEqual([
+      'user-inflight-runtime-1',
+      'assistant-interim-stable-1',
+      'assistant-interim-stable-2',
+      'assistant-stream-runtime-1'
+    ])
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      'current prompt',
+      'streamed checkpoint',
+      'tool-call commentary',
+      'remaining answer'
+    ])
+    expect(restored[1]).toMatchObject({ pending: false })
+    expect(restored[2]).toMatchObject({ pending: false })
+    expect(restored[3]).toMatchObject({ pending: true })
   })
 
   it('preserves the original array when no live projection exists', () => {

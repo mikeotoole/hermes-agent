@@ -436,6 +436,11 @@ export interface SessionMessagesResponse {
 export interface SessionResumeResponse {
   inflight?: null | {
     assistant?: string
+    interim?: Array<{
+      already_streamed?: boolean
+      segment_id?: string
+      text?: string
+    }>
     streaming?: boolean
     user?: string
   }

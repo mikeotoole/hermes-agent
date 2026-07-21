@@ -287,6 +287,34 @@ export function preserveLocalPendingTurnMessages(
   return preserved.length ? [...nextMessages, ...preserved] : nextMessages
 }
 
+interface LiveInterimSegment {
+  alreadyStreamed: boolean
+  segmentId: string
+  text: string
+}
+
+function liveInterimSegments(inflight: SessionResumeResponse['inflight']): LiveInterimSegment[] {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const segment = raw as Record<string, unknown>
+        const segmentId = typeof segment.segment_id === 'string' ? segment.segment_id.trim() : ''
+        const text = typeof segment.text === 'string' ? segment.text : ''
+
+        return segmentId && text ? [{ alreadyStreamed: Boolean(segment.already_streamed), segmentId, text }] : []
+      })
+    : []
+}
+
+export function hasLiveInterimProjection(inflight: SessionResumeResponse['inflight']): boolean {
+  return liveInterimSegments(inflight).length > 0
+}
+
 /**
  * Append the backend-only tail of a live turn to a stored transcript.
  *
@@ -301,11 +329,12 @@ export function appendLiveSessionProjection(
   projection: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>
 ): ChatMessage[] {
   const inflightUser = projection.inflight?.user?.trim() ?? ''
-  const inflightAssistant = projection.inflight?.assistant ?? ''
+  let inflightAssistant = projection.inflight?.assistant ?? ''
   const inflightStreaming = Boolean(projection.inflight?.streaming)
   const queuedUser = projection.queued?.user?.trim() ?? ''
+  const inflightInterim = liveInterimSegments(projection.inflight)
 
-  if (!inflightUser && !inflightAssistant && !inflightStreaming && !queuedUser) {
+  if (!inflightUser && !inflightAssistant && !inflightStreaming && !inflightInterim.length && !queuedUser) {
     return messages
   }
 
@@ -318,6 +347,19 @@ export function appendLiveSessionProjection(
       role: 'user',
       parts: [textPart(inflightUser)]
     })
+  }
+
+  for (const segment of inflightInterim) {
+    projected.push({
+      id: `assistant-interim-${segment.segmentId}`,
+      role: 'assistant',
+      parts: [assistantTextPart(segment.text)],
+      pending: false
+    })
+
+    if (segment.alreadyStreamed && inflightAssistant.startsWith(segment.text)) {
+      inflightAssistant = inflightAssistant.slice(segment.text.length)
+    }
   }
 
   // Keep a pending assistant boundary even before the first delta when a

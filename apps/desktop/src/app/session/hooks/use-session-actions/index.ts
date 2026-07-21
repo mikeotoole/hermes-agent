@@ -71,6 +71,7 @@ import {
   applyStoredSessionPreviewRuntimeInfo,
   type BranchMessage,
   chatMessageArraysEquivalent,
+  hasLiveInterimProjection,
   isSessionGoneError,
   patchSessionWorkspace,
   preserveLocalPendingTurnMessages,
@@ -710,7 +711,8 @@ export function useSessionActions({
                   ...(runtimeInfo ?? {}),
                   messages: activatedMessages,
                   busy: running,
-                  awaitingResponse: running
+                  awaitingResponse: running,
+                  interimBoundaryPending: hasLiveInterimProjection(activated.inflight)
                 }),
                 storedSessionId
               )
@@ -904,7 +906,8 @@ export function useSessionActions({
             ...(runtimeInfo ?? {}),
             messages: messagesForView,
             busy: resumedRunning,
-            awaitingResponse: resumedRunning
+            awaitingResponse: resumedRunning,
+            interimBoundaryPending: hasLiveInterimProjection(resumed.inflight)
           }),
           storedSessionId
         )

@@ -90,6 +90,10 @@ export type GatewayEventPayload = {
   // message.complete — signals the final text was already previewed via
   // interim_assistant_callback, so the UI can settle instead of duplicating.
   response_previewed?: boolean
+  // message.interim — stable reconnect identity and whether message.delta
+  // already populated the streaming bubble with this text.
+  already_streamed?: boolean
+  segment_id?: string
 }
 
 export function textPart(text: string): ChatMessagePart {
