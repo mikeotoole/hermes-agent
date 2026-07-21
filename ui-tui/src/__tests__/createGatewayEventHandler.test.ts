@@ -1919,6 +1919,40 @@ describe('createGatewayEventHandler', () => {
       expect(appended).toHaveLength(0)
     })
 
+    it('dedupes repeated live interim events by stable segment id', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['checkpoint'])
+    })
+
+    it('keeps non-streamed interim commentary distinct from streamed text', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'streamed prefix' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-commentary', text: 'tool-call commentary' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'streamed prefix',
+        'tool-call commentary'
+      ])
+    })
+
     it('keeps identical interim and terminal replies as separate messages without response_previewed', () => {
       const appended: Msg[] = []
       const onEvent = createGatewayEventHandler(buildCtx(appended))

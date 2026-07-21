@@ -204,8 +204,15 @@ export interface SessionActiveListResponse {
 
 export interface SessionInflightTurn {
   assistant?: string
+  interim?: SessionInterimBoundary[]
   streaming?: boolean
   user?: string
+}
+
+export interface SessionInterimBoundary {
+  already_streamed?: boolean
+  segment_id?: string
+  text?: string
 }
 
 export interface SessionActivateResponse {
@@ -721,7 +728,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {
-      payload: { already_streamed?: boolean; text: string }
+      payload: { already_streamed?: boolean; segment_id?: string; text: string }
       session_id?: string
       type: 'message.interim'
     }
