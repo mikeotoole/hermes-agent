@@ -372,7 +372,7 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string, segmentId?: string, alreadyStreamed = true) => {
+    (sessionId: string, text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
@@ -380,6 +380,7 @@ export function useMessageStream({
 
         const authoritativeText = renderMediaTags(text).trim()
         const stableMessageId = segmentId ? `assistant-interim-${segmentId}` : null
+        const renderedPrefix = assistantPrefix === undefined ? null : renderMediaTags(assistantPrefix).trim()
 
         if (!authoritativeText) {
           return state
@@ -401,20 +402,52 @@ export function useMessageStream({
 
         let nextMessages = state.messages
 
-        const hasStreamMessage = Boolean(streamId && nextMessages.some(m => m.id === streamId))
+        const streamMessage = streamId ? nextMessages.find(message => message.id === streamId) : undefined
+        const hasStreamMessage = Boolean(streamMessage)
 
         if (streamId && hasStreamMessage && alreadyStreamed) {
-          // Finalize the existing streaming bubble in place
-          nextMessages = nextMessages.map(m =>
-            m.id === streamId
-              ? {
-                  ...m,
-                  ...(stableMessageId ? { id: stableMessageId } : {}),
-                  parts: replaceTextPart(m.parts),
-                  pending: false
-                }
-              : m
-          )
+          if (
+            renderedPrefix !== null &&
+            (!renderedPrefix.endsWith(authoritativeText) || chatMessageText(streamMessage!).trim() !== renderedPrefix)
+          ) {
+            return state
+          }
+
+          const leadingText = renderedPrefix?.slice(0, renderedPrefix.length - authoritativeText.length) ?? ''
+
+          if (leadingText) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId
+                ? {
+                    ...message,
+                    parts: mergeFinalAssistantText(message.parts, leadingText),
+                    pending: false
+                  }
+                : message
+            )
+            nextMessages = [
+              ...nextMessages,
+              {
+                id: stableMessageId ?? `assistant-interim-${Date.now()}`,
+                role: 'assistant' as const,
+                parts: [assistantTextPart(authoritativeText)],
+                pending: false,
+                branchGroupId: state.pendingBranchGroup ?? undefined
+              }
+            ]
+          } else {
+            // Finalize the existing streaming bubble in place.
+            nextMessages = nextMessages.map(m =>
+              m.id === streamId
+                ? {
+                    ...m,
+                    ...(stableMessageId ? { id: stableMessageId } : {}),
+                    parts: replaceTextPart(m.parts),
+                    pending: false
+                  }
+                : m
+            )
+          }
         } else {
           // Commentary that was not emitted through message.delta is its own
           // boundary. Preserve any preceding stream instead of replacing it.

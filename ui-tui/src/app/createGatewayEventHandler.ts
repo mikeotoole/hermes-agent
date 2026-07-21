@@ -951,7 +951,31 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         const segmentId = typeof ev.payload?.segment_id === 'string' ? ev.payload.segment_id.trim() : ''
         const alreadyStreamed = ev.payload?.already_streamed !== false
 
+        const assistantPrefix =
+          typeof ev.payload?.assistant_prefix === 'string' ? ev.payload.assistant_prefix.trimStart() : null
+
         if (typeof text === 'string' && text.trim()) {
+          if (assistantPrefix !== null) {
+            const authoritativeText = text.trimStart()
+
+            if (turnController.bufRef.trimStart() !== assistantPrefix) {
+              return
+            }
+
+            if (alreadyStreamed) {
+              if (!assistantPrefix.endsWith(authoritativeText)) {
+                return
+              }
+
+              const leadingText = assistantPrefix.slice(0, assistantPrefix.length - authoritativeText.length)
+
+              if (leadingText) {
+                turnController.hydrateStreamingText(leadingText)
+                turnController.flushStreamingSegment()
+              }
+            }
+          }
+
           turnController.recordInterimMessage(text, segmentId || undefined, alreadyStreamed)
         }
 

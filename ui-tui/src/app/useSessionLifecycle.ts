@@ -60,6 +60,7 @@ export const liveSessionInflightMessages = (inflight?: null | SessionInflightTur
 
 interface LiveInterimBoundary {
   alreadyStreamed: boolean
+  assistantOffset: null | number
   segmentId: string
   text: string
 }
@@ -74,31 +75,72 @@ export const liveSessionInterimBoundaries = (inflight?: null | SessionInflightTu
         }
 
         const boundary = raw as Record<string, unknown>
+
+        const assistantOffset =
+          typeof boundary.assistant_offset === 'number' &&
+          Number.isInteger(boundary.assistant_offset) &&
+          boundary.assistant_offset >= 0
+            ? boundary.assistant_offset
+            : null
+
         const segmentId = typeof boundary.segment_id === 'string' ? boundary.segment_id.trim() : ''
         const text = typeof boundary.text === 'string' ? boundary.text : ''
 
-        return segmentId && text ? [{ alreadyStreamed: Boolean(boundary.already_streamed), segmentId, text }] : []
+        return segmentId && text
+          ? [{ alreadyStreamed: Boolean(boundary.already_streamed), assistantOffset, segmentId, text }]
+          : []
       })
     : []
 }
 
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
-  let assistant = String(inflight?.assistant ?? '')
+  const assistant = String(inflight?.assistant ?? '')
   const interim = liveSessionInterimBoundaries(inflight)
+  let assistantCursor = 0
 
   if (!assistant && !inflight?.streaming && !interim.length) {
     return
   }
 
   for (const boundary of interim) {
-    turnController.recordInterimMessage(boundary.text, boundary.segmentId, boundary.alreadyStreamed)
+    const assistantOffset = boundary.assistantOffset
 
-    if (boundary.alreadyStreamed && assistant.startsWith(boundary.text)) {
-      assistant = assistant.slice(boundary.text.length)
+    if (assistantOffset !== null) {
+      if (assistantOffset < assistantCursor || assistantOffset > assistant.length) {
+        continue
+      }
+
+      if (boundary.alreadyStreamed) {
+        const segmentStart = assistantOffset - boundary.text.length
+
+        if (segmentStart < assistantCursor || assistant.slice(segmentStart, assistantOffset) !== boundary.text) {
+          continue
+        }
+
+        turnController.hydrateStreamingText(assistant.slice(assistantCursor, segmentStart))
+        turnController.flushStreamingSegment()
+      } else {
+        turnController.hydrateStreamingText(assistant.slice(assistantCursor, assistantOffset))
+        turnController.flushStreamingSegment()
+      }
+
+      assistantCursor = assistantOffset
+    } else if (boundary.alreadyStreamed) {
+      if (!assistant.slice(assistantCursor).startsWith(boundary.text)) {
+        continue
+      }
+
+      assistantCursor += boundary.text.length
+    } else {
+      turnController.hydrateStreamingText(assistant.slice(assistantCursor))
+      turnController.flushStreamingSegment()
+      assistantCursor = assistant.length
     }
+
+    turnController.recordInterimMessage(boundary.text, boundary.segmentId, boundary.alreadyStreamed)
   }
 
-  turnController.hydrateStreamingText(assistant)
+  turnController.hydrateStreamingText(assistant.slice(assistantCursor))
 }
 
 export const signalFreshSessionBoundary = (

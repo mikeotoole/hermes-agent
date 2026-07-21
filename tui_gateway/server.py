@@ -4327,6 +4327,10 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _utf16_code_units(text: str) -> int:
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
 def _on_interim_assistant(
     sid: str, text: Any, *, already_streamed: bool = False
 ) -> None:
@@ -4342,7 +4346,12 @@ def _on_interim_assistant(
             with lock:
                 turn = session.get("inflight_turn")
                 if isinstance(turn, dict):
-                    turn.setdefault("interim", []).append(dict(payload))
+                    assistant_prefix = str(turn.get("assistant") or "")
+                    payload["assistant_prefix"] = assistant_prefix
+                    boundary = dict(payload)
+                    boundary.pop("assistant_prefix", None)
+                    boundary["assistant_offset"] = _utf16_code_units(assistant_prefix)
+                    turn.setdefault("interim", []).append(boundary)
                     turn["updated_at"] = time.time()
     _emit("message.interim", sid, payload)
 
@@ -5768,13 +5777,15 @@ def _inflight_snapshot(session: dict) -> dict | None:
         text = str(raw.get("text") or "")
         if not segment_id or not text:
             continue
-        interim.append(
-            {
-                "already_streamed": bool(raw.get("already_streamed")),
-                "segment_id": segment_id,
-                "text": text,
-            }
-        )
+        boundary = {
+            "already_streamed": bool(raw.get("already_streamed")),
+            "segment_id": segment_id,
+            "text": text,
+        }
+        assistant_offset = raw.get("assistant_offset")
+        if isinstance(assistant_offset, int) and not isinstance(assistant_offset, bool) and assistant_offset >= 0:
+            boundary["assistant_offset"] = assistant_offset
+        interim.append(boundary)
     if not user and not assistant and not streaming and not interim:
         return None
     snapshot = {

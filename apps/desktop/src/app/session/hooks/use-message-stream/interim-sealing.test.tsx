@@ -58,10 +58,15 @@ async function mountStream(initialState?: ClientSessionState) {
 const start = () => act(() => handleEvent!({ payload: {}, session_id: SID, type: 'message.start' }))
 const delta = (text: string) => act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.delta' }))
 
-const interim = (text: string, segmentId?: string, alreadyStreamed = true) =>
+const interim = (text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) =>
   act(() =>
     handleEvent!({
-      payload: { text, already_streamed: alreadyStreamed, ...(segmentId ? { segment_id: segmentId } : {}) },
+      payload: {
+        text,
+        already_streamed: alreadyStreamed,
+        ...(segmentId ? { segment_id: segmentId } : {}),
+        ...(assistantPrefix === undefined ? {} : { assistant_prefix: assistantPrefix })
+      },
       session_id: SID,
       type: 'message.interim'
     })
@@ -152,6 +157,19 @@ describe('useMessageStream interim text sealing', () => {
 
     expect(assistantMessages()).toEqual(['streamed prefix', 'tool-call commentary'])
     expect(getState().messages.some(message => message.id === 'assistant-interim-stable-commentary')).toBe(true)
+  })
+
+  it('keeps ordinary streamed text before already-streamed commentary', async () => {
+    await mountStream()
+    await start()
+    await delta('ordinary prefixstreamed commentary')
+
+    await interim('streamed commentary', 'stable-streamed-commentary', true, 'ordinary prefixstreamed commentary')
+
+    expect(assistantMessages()).toEqual(['ordinary prefix', 'streamed commentary'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-streamed-commentary')).toBe(
+      true
+    )
   })
 
   it('dedupes interim text when the final response includes it', async () => {

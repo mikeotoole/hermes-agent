@@ -93,6 +93,7 @@ export type GatewayEventPayload = {
   // message.interim — stable reconnect identity and whether message.delta
   // already populated the streaming bubble with this text.
   already_streamed?: boolean
+  assistant_prefix?: string
   segment_id?: string
 }
 

@@ -1732,6 +1732,28 @@ describe('createGatewayEventHandler', () => {
       ])
     })
 
+    it('keeps ordinary streamed text before already-streamed commentary', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'ordinary prefixstreamed commentary' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'ordinary prefixstreamed commentary',
+          segment_id: 'stable-streamed-commentary',
+          text: 'streamed commentary'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'ordinary prefix',
+        'streamed commentary'
+      ])
+    })
+
     it('keeps identical interim and terminal replies as separate messages without response_previewed', () => {
       const appended: Msg[] = []
       const onEvent = createGatewayEventHandler(buildCtx(appended))

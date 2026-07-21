@@ -79,7 +79,8 @@ interface GatewayEventDeps {
     sessionId: string,
     text: string,
     segmentId?: string,
-    alreadyStreamed?: boolean
+    alreadyStreamed?: boolean,
+    assistantPrefix?: string
   ) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
@@ -416,9 +417,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const text = coerceGatewayText(payload?.text)
           const segmentId = typeof payload?.segment_id === 'string' ? payload.segment_id.trim() : ''
           const alreadyStreamed = payload?.already_streamed !== false
+          const assistantPrefix = typeof payload?.assistant_prefix === 'string' ? payload.assistant_prefix : undefined
 
           if (text) {
-            finalizeInterimAssistantMessage(sessionId, text, segmentId || undefined, alreadyStreamed)
+            finalizeInterimAssistantMessage(sessionId, text, segmentId || undefined, alreadyStreamed, assistantPrefix)
           }
         }
       } else if (event.type === 'thinking.delta') {
