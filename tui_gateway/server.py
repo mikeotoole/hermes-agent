@@ -10111,13 +10111,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             # losing it when message.complete replaces the streaming buffer.
             # Gated on display.interim_assistant_messages (default true).
             if _load_interim_assistant_messages():
-                def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-                    _emit("message.interim", sid, {
-                        "text": text,
-                        "already_streamed": already_streamed,
-                    })
-
-                agent.interim_assistant_callback = _interim_assistant_cb
+                agent.interim_assistant_callback = (
+                    lambda text, *, already_streamed=False: _on_interim_assistant(
+                        sid, text, already_streamed=already_streamed
+                    )
+                )
             else:
                 agent.interim_assistant_callback = None
 
