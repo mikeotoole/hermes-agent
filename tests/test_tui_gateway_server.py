@@ -4594,7 +4594,15 @@ def test_run_prompt_submit_snapshots_interim_callback_for_reconnect(
     assert payload["text"] == "checkpoint"
     assert payload["already_streamed"] is False
     assert isinstance(payload["segment_id"], str) and payload["segment_id"]
-    assert snapshots[0]["interim"] == [payload]
+    assert payload["assistant_prefix"] == ""
+    assert snapshots[0]["interim"] == [
+        {
+            "already_streamed": False,
+            "assistant_offset": 0,
+            "segment_id": payload["segment_id"],
+            "text": "checkpoint",
+        }
+    ]
     assert turns == ["prompt"]
 
 

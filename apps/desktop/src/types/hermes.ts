@@ -584,6 +584,7 @@ export interface SessionResumeResponse {
     assistant?: string
     interim?: Array<{
       already_streamed?: boolean
+      assistant_offset?: number
       segment_id?: string
       text?: string
     }>

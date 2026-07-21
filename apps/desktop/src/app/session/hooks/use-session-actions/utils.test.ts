@@ -627,12 +627,14 @@ describe('appendLiveSessionProjection', () => {
           {
             segment_id: 'stable-1',
             text: 'streamed checkpoint',
-            already_streamed: true
+            already_streamed: true,
+            assistant_offset: 'streamed checkpoint'.length
           },
           {
             segment_id: 'stable-2',
             text: 'tool-call commentary',
-            already_streamed: false
+            already_streamed: false,
+            assistant_offset: 'streamed checkpoint'.length
           }
         ]
       }
@@ -653,6 +655,73 @@ describe('appendLiveSessionProjection', () => {
     expect(restored[1]).toMatchObject({ pending: false })
     expect(restored[2]).toMatchObject({ pending: false })
     expect(restored[3]).toMatchObject({ pending: true })
+  })
+
+  it('restores streamed text on both sides of non-streamed commentary', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: '😀streamed prefixtail',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: '😀streamed prefix'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      '😀streamed prefix',
+      'tool-call commentary',
+      'tail'
+    ])
+  })
+
+  it('rejects mismatched streamed boundaries without reserving their stable id', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'tail',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'bad',
+            text: 'wrong',
+            already_streamed: true,
+            assistant_offset: 'tail'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.id)).toEqual(['assistant-stream-runtime-1'])
+    expect(restored[0]?.parts.map(part => ('text' in part ? part.text : '')).join('')).toBe('tail')
+  })
+
+  it('preserves streamed-before-commentary ordering for old snapshots without prefixes', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'streamed prefix',
+        streaming: false,
+        interim: [
+          {
+            segment_id: 'legacy-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      'streamed prefix',
+      'tool-call commentary'
+    ])
   })
 
   // Corrections typed while a turn ran are their own user bubbles on the same

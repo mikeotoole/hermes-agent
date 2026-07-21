@@ -74,8 +74,18 @@ describe('live session activation in-flight state', () => {
       streaming: true,
       user: 'current prompt',
       interim: [
-        { already_streamed: true, segment_id: 'stable-1', text: 'streamed checkpoint' },
-        { already_streamed: false, segment_id: 'stable-2', text: 'tool-call commentary' }
+        {
+          already_streamed: true,
+          assistant_offset: 'streamed checkpoint'.length,
+          segment_id: 'stable-1',
+          text: 'streamed checkpoint'
+        },
+        {
+          already_streamed: false,
+          assistant_offset: 'streamed checkpoint'.length,
+          segment_id: 'stable-2',
+          text: 'tool-call commentary'
+        }
       ]
     }
 
@@ -88,6 +98,53 @@ describe('live session activation in-flight state', () => {
     ])
     expect(turnController.bufRef).toBe('remaining answer')
     expect(getTurnState().streaming).toBe('remaining answer')
+  })
+
+  it('hydrates streamed text around commentary and ignores mismatched streamed boundaries', () => {
+    hydrateLiveSessionInflight({
+      assistant: '😀streamed prefixtail',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: false,
+          assistant_offset: '😀streamed prefix'.length,
+          segment_id: 'stable-commentary',
+          text: 'tool-call commentary'
+        },
+        {
+          already_streamed: true,
+          assistant_offset: '😀streamed prefixtail'.length,
+          segment_id: 'bad',
+          text: 'wrong'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+      '😀streamed prefix',
+      'tool-call commentary'
+    ])
+    expect(getTurnState().streaming).toBe('tail')
+  })
+
+  it('preserves streamed-before-commentary ordering for old snapshots without prefixes', () => {
+    hydrateLiveSessionInflight({
+      assistant: 'streamed prefix',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: false,
+          segment_id: 'legacy-commentary',
+          text: 'tool-call commentary'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+      'streamed prefix',
+      'tool-call commentary'
+    ])
+    expect(getTurnState().streaming).toBe('')
   })
 
   it('ignores empty in-flight payloads', () => {

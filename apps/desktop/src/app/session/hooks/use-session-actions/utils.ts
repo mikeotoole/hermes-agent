@@ -429,6 +429,7 @@ export function preserveLocalPendingTurnMessages(
 
 interface LiveInterimSegment {
   alreadyStreamed: boolean
+  assistantOffset: null | number
   segmentId: string
   text: string
 }
@@ -444,10 +445,19 @@ function liveInterimSegments(inflight: SessionResumeResponse['inflight']): LiveI
 
         const segment = raw as Record<string, unknown>
 
+        const assistantOffset =
+          typeof segment.assistant_offset === 'number' &&
+          Number.isInteger(segment.assistant_offset) &&
+          segment.assistant_offset >= 0
+            ? segment.assistant_offset
+            : null
+
         const segmentId = typeof segment.segment_id === 'string' ? segment.segment_id.trim() : ''
         const text = typeof segment.text === 'string' ? segment.text : ''
 
-        return segmentId && text ? [{ alreadyStreamed: Boolean(segment.already_streamed), segmentId, text }] : []
+        return segmentId && text
+          ? [{ alreadyStreamed: Boolean(segment.already_streamed), assistantOffset, segmentId, text }]
+          : []
       })
     : []
 }
@@ -470,7 +480,7 @@ export function appendLiveSessionProjection(
   projection: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>
 ): ChatMessage[] {
   const inflightUser = projection.inflight?.user?.trim() ?? ''
-  let inflightAssistant = projection.inflight?.assistant ?? ''
+  const inflightAssistant = projection.inflight?.assistant ?? ''
   const inflightStreaming = Boolean(projection.inflight?.streaming)
 
   // Mid-turn redirect corrections. They are additional user bubbles belonging
@@ -500,8 +510,6 @@ export function appendLiveSessionProjection(
 
   const sessionId = projection.session_id || 'session'
   const projected: ChatMessage[] = []
-<<<<<<< HEAD
-=======
   let assistantCursor = 0
   let streamChunkIndex = 0
 
@@ -518,7 +526,6 @@ export function appendLiveSessionProjection(
     })
   }
 
->>>>>>> 270a9d931 (fixup! fix(desktop): restore interim reconnect boundaries)
   // A turn normally persists its user row before inference begins. session.resume
   // then returns that stored row *and* the still-live inflight projection; adding
   // both makes a backgrounded prompt appear twice when its session is reopened.
@@ -564,6 +571,39 @@ export function appendLiveSessionProjection(
   }
 
   for (const segment of inflightInterim) {
+    const assistantOffset = segment.assistantOffset
+
+    if (assistantOffset !== null) {
+      if (assistantOffset < assistantCursor || assistantOffset > inflightAssistant.length) {
+        continue
+      }
+
+      if (segment.alreadyStreamed) {
+        const segmentStart = assistantOffset - segment.text.length
+
+        if (segmentStart < assistantCursor || inflightAssistant.slice(segmentStart, assistantOffset) !== segment.text) {
+          continue
+        }
+
+        pushStreamChunk(inflightAssistant.slice(assistantCursor, segmentStart))
+      } else {
+        pushStreamChunk(inflightAssistant.slice(assistantCursor, assistantOffset))
+      }
+
+      assistantCursor = assistantOffset
+    } else if (segment.alreadyStreamed) {
+      if (!inflightAssistant.slice(assistantCursor).startsWith(segment.text)) {
+        continue
+      }
+
+      assistantCursor += segment.text.length
+    } else {
+      // Older gateways did not provide an assistant prefix. Preserve all known
+      // streamed text before non-streamed commentary rather than reversing it.
+      pushStreamChunk(inflightAssistant.slice(assistantCursor))
+      assistantCursor = inflightAssistant.length
+    }
+
     projected.push({
       id: `assistant-interim-${segment.segmentId}`,
       role: 'assistant',
@@ -571,19 +611,17 @@ export function appendLiveSessionProjection(
       pending: false,
       interim: true
     })
-
-    if (segment.alreadyStreamed && inflightAssistant.startsWith(segment.text)) {
-      inflightAssistant = inflightAssistant.slice(segment.text.length)
-    }
   }
+
+  const assistantTail = inflightAssistant.slice(assistantCursor)
 
   // Keep a pending assistant boundary even before the first delta when a
   // queued user turn follows it. This preserves the two distinct turns.
-  if (inflightAssistant || inflightStreaming || inflightError || (inflightUser && queuedUser)) {
+  if (assistantTail || inflightStreaming || inflightError || (inflightUser && queuedUser)) {
     projected.push({
       id: `assistant-stream-${sessionId}`,
       role: 'assistant',
-      parts: inflightAssistant ? [assistantTextPart(inflightAssistant)] : [],
+      parts: assistantTail ? [assistantTextPart(assistantTail)] : [],
       pending: inflightStreaming,
       ...(inflightError ? { error: inflightError } : {})
     })
