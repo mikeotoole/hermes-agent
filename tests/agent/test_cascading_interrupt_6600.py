@@ -117,25 +117,35 @@ def test_anthropic_non_streaming_stale_aborts_request_client_not_shared():
     agent._abort_request_anthropic_client = MagicMock()
     agent._close_request_anthropic_client = MagicMock()
 
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
     def _create(_api_kwargs, *, client):
         assert client is request_client
-        # Outlive the 0.05s stale timeout AND the worker join (2.0s) so the
-        # stale detector surfaces its TimeoutError.
-        time.sleep(2.5)
+        worker_started.set()
+        # Remain blocked through the watchdog's 2s join. A fixed sleep races
+        # scheduler load and can finish just before the poll thread checks the
+        # result, incorrectly turning this timeout regression test green.
+        assert release_worker.wait(timeout=10)
         return object()
 
     agent._anthropic_messages_create = MagicMock(side_effect=_create)
 
-    with pytest.raises(TimeoutError):
-        cch.interruptible_api_call(agent, {"model": "x", "messages": []})
+    try:
+        with pytest.raises(TimeoutError):
+            cch.interruptible_api_call(agent, {"model": "x", "messages": []})
 
-    # Shared client untouched from the poll thread.
-    agent._anthropic_client.close.assert_not_called()
-    agent._rebuild_anthropic_client.assert_not_called()
-    # Poll (stranger) thread aborts the request-local client's socket only.
-    agent._abort_request_anthropic_client.assert_called_once_with(
-        request_client, reason="stale_call_kill"
-    )
+        assert worker_started.is_set()
+        # Shared client untouched from the poll thread.
+        agent._anthropic_client.close.assert_not_called()
+        agent._rebuild_anthropic_client.assert_not_called()
+        # Poll (stranger) thread aborts the request-local client's socket only.
+        agent._abort_request_anthropic_client.assert_called_once_with(
+            request_client, reason="stale_call_kill"
+        )
+    finally:
+        release_worker.set()
+
     # Worker unblocks and closes its own request client from its own thread.
     _wait_for_mock_call(agent._close_request_anthropic_client)
 
