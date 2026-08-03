@@ -347,7 +347,24 @@ class TestRunCommandTts:
             def wait(self, timeout=None):
                 return self.returncode
 
-        with patch("tools.tts_tool.subprocess.Popen", return_value=FakeProcess()):
+        class InlineThread:
+            """Run readers before the monitor to model scheduler preemption."""
+
+            ident = 1
+
+            def __init__(self, target, args, daemon):
+                self._target = target
+                self._args = args
+
+            def start(self):
+                self._target(*self._args)
+
+            def join(self, timeout=None):
+                return None
+
+        with patch("tools.tts_tool.subprocess.Popen", return_value=FakeProcess()), \
+             patch("tools.tts_tool.threading.Thread", InlineThread), \
+             patch("tools.tts_tool.time.monotonic", side_effect=[0.0] + [1.0] * 10):
             result = _run_command_tts("fake tts", timeout=0.25)
 
         assert result.returncode == 0

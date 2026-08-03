@@ -746,14 +746,20 @@ def _run_command_stt(
     deadline = time.monotonic() + timeout
     timed_out = False
     while open_streams:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            break
         try:
-            name, chunk = output_queue.get(timeout=min(0.05, remaining))
+            # Drain progress already captured by the reader threads before
+            # deciding the provider was idle. The monitor itself may be
+            # scheduler-preempted past the deadline while output is queued.
+            name, chunk = output_queue.get_nowait()
         except queue.Empty:
-            continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                name, chunk = output_queue.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
         if chunk is None:
             open_streams.discard(name)
             continue

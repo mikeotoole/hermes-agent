@@ -24,6 +24,7 @@ file to the allowlist without a reason of the same class.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -48,7 +49,7 @@ ALLOWLIST = {
 # Directories that never count (tests may build fixture configs freely).
 EXCLUDED_DIR_PARTS = {
     "tests", ".venv", ".git", ".worktrees", "node_modules", "website",
-    "docs", "scripts", "examples", "apps",
+    "docs", "scripts", "examples", "apps", "__pycache__",
 }
 
 # A safe_load within this many lines of a config.yaml reference is treated
@@ -60,11 +61,21 @@ CONFIG_YAML_RE = re.compile(r"""["']config\.yaml["']""")
 
 
 def _iter_source_files():
-    for path in REPO_ROOT.rglob("*.py"):
-        rel = path.relative_to(REPO_ROOT)
-        if any(part in EXCLUDED_DIR_PARTS for part in rel.parts):
-            continue
-        yield rel, path
+    # pathlib.rglob raises when another test process removes a transient
+    # __pycache__ between scandir calls. os.walk ignores disappearing
+    # directories by default and lets us prune excluded trees before descent.
+    def handle_walk_error(exc: OSError) -> None:
+        if not isinstance(exc, FileNotFoundError):
+            raise exc
+
+    for root, dirs, files in os.walk(REPO_ROOT, onerror=handle_walk_error):
+        dirs[:] = [name for name in dirs if name not in EXCLUDED_DIR_PARTS]
+        root_path = Path(root)
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = root_path / name
+            yield path.relative_to(REPO_ROOT), path
 
 
 def test_no_raw_config_yaml_reads_outside_owner_modules():

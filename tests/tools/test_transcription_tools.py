@@ -1208,6 +1208,48 @@ class TestRunCommandSttIdleTimeout:
         assert "tick 3" in result.stderr
         assert "done" in result.stdout
 
+    def test_queued_progress_beats_expired_monitor_deadline(self):
+        """Already-captured output wins if the monitor itself was preempted."""
+        from tools.transcription_tools import _run_command_stt
+
+        class FakeStream:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read(self, size):
+                return self.chunks.pop(0) if self.chunks else ""
+
+        class FakeProcess:
+            pid = 12345
+            returncode = 0
+            stdout = FakeStream(["done"])
+            stderr = FakeStream(["tick"])
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        class InlineThread:
+            ident = 1
+
+            def __init__(self, target, args, daemon):
+                self._target = target
+                self._args = args
+
+            def start(self):
+                self._target(*self._args)
+
+            def join(self, timeout=None):
+                return None
+
+        with patch("tools.transcription_tools.subprocess.Popen", return_value=FakeProcess()), \
+             patch("tools.transcription_tools.threading.Thread", InlineThread), \
+             patch("tools.transcription_tools.time.monotonic", side_effect=[0.0] + [1.0] * 10):
+            result = _run_command_stt("fake stt", timeout=0.25)
+
+        assert result.returncode == 0
+        assert result.stdout == "done"
+        assert result.stderr == "tick"
+
     def test_silent_stall_still_times_out(self, tmp_path):
         """A silently stalled command is killed once the idle window elapses,
         and pre-stall output is preserved on the TimeoutExpired."""

@@ -141,6 +141,7 @@ async def test_reconnect_redials_after_unexpected_close():
     # transport with reconnect=True re-dials and handshakes again.
     drops = {"n": 0}
     srv = _IdleAwareServer()
+    reconnected = asyncio.Event()
 
     async def handle(ws):
         srv.connections += 1
@@ -151,6 +152,8 @@ async def test_reconnect_redials_after_unexpected_close():
                 frame = json.loads(line)
                 if frame.get("type") == "hello":
                     await ws.send(json.dumps({"type": "descriptor", "descriptor": DESCRIPTOR}) + "\n")
+                    if srv.connections >= 2:
+                        reconnected.set()
                     if drops["n"] == 0:
                         drops["n"] += 1
                         await ws.close()  # force an unexpected close on the first connection
@@ -164,7 +167,7 @@ async def test_reconnect_redials_after_unexpected_close():
         await t.connect()
         await t.handshake()
         # First connection is dropped server-side; the reconnect loop re-dials.
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(reconnected.wait(), timeout=2.0)
         assert srv.connections >= 2
     finally:
         await t.disconnect()
