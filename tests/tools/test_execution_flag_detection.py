@@ -51,9 +51,10 @@ def test_real_binaries_execute_leading_dash_program_payload(
         pytest.skip(f"{tool} or script is not installed")
 
     marker = tmp_path / "executed"
-    payload = tmp_path / "-payload-marker"
-    payload.write_text("#!/bin/sh\nprintf executed > \"$MARKER\"\ncat\n")
-    payload.chmod(0o755)
+    for name in ("payload-marker", "-payload-marker"):
+        payload = tmp_path / name
+        payload.write_text("#!/bin/sh\nprintf executed > \"$MARKER\"\ncat\n")
+        payload.chmod(0o755)
     input_file = tmp_path / "input.txt"
     input_file.write_text("needle\n")
     resolved_args = [arg.format(input=str(input_file)) for arg in args]
@@ -68,11 +69,46 @@ def test_real_binaries_execute_leading_dash_program_payload(
         "MARKER": str(marker),
         "TERM": "xterm",
     }
-    argv = [tool, *resolved_args]
-    if needs_tty:
-        argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
+    def _candidates(command):
+        if not needs_tty:
+            return [command]
+        return [
+            ["script", "-qec", shlex.join(command), "/dev/null"],
+            ["script", "-q", "/dev/null", *command],
+        ]
 
-    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
+    # Prove this host supports the exact option + PTY shape with an ordinary
+    # executable name. A missing marker means the case is unsupported here,
+    # not that leading-dash handling is safe.
+    control_args = [
+        "payload-marker" if arg == "-payload-marker" else arg
+        for arg in resolved_args
+    ]
+    supported_candidate = None
+    for idx, candidate in enumerate(_candidates([tool, *control_args])):
+        marker.unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                candidate,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if marker.exists():
+            supported_candidate = idx
+            break
+    if supported_candidate is None:
+        pytest.skip(f"{tool} does not support this executable option form")
+
+    marker.unlink(missing_ok=True)
+    argv = _candidates([tool, *resolved_args])[supported_candidate]
+    subprocess.run(
+        argv, input=input_text, text=True, capture_output=True, env=env, timeout=20
+    )
 
     assert marker.read_text() == "executed"
 

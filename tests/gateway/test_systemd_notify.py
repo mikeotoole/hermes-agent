@@ -3,28 +3,36 @@
 from __future__ import annotations
 
 import asyncio
-import socket
-
 import pytest
 
 
-@pytest.mark.skipif(
-    not hasattr(socket, "AF_UNIX"), reason="Unix datagram sockets are unavailable"
-)
 def test_notify_supports_systemd_abstract_socket(monkeypatch):
-    name = "\0hermes-test-notify"
-    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    receiver.bind(name)
-    receiver.settimeout(1.0)
+    calls: list[object] = []
+
+    class _Sender:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def setblocking(self, value):
+            calls.append(("setblocking", value))
+
+        def connect(self, address):
+            calls.append(("connect", address))
+
+        def send(self, payload):
+            calls.append(("send", payload))
+
+    import gateway.systemd_notify as notify_mod
+
     monkeypatch.setenv("NOTIFY_SOCKET", "@hermes-test-notify")
+    monkeypatch.setattr(notify_mod.socket, "socket", lambda *_args: _Sender())
 
-    try:
-        from gateway.systemd_notify import notify
-
-        assert notify("WATCHDOG=1") is True
-        assert receiver.recv(4096) == b"WATCHDOG=1"
-    finally:
-        receiver.close()
+    assert notify_mod.notify("WATCHDOG=1") is True
+    assert ("connect", "\0hermes-test-notify") in calls
+    assert ("send", b"WATCHDOG=1") in calls
 
 
 def test_notify_uses_nonblocking_datagram_send(monkeypatch):

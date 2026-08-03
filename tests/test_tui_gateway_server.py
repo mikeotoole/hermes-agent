@@ -879,12 +879,14 @@ class _BrokenStdout:
         return None
 
 
-def test_write_json_serializes_concurrent_writes(monkeypatch):
+def test_write_json_serializes_concurrent_writes():
+    from tui_gateway.transport import StdioTransport
+
     out = _ChunkyStdout()
-    monkeypatch.setattr(server, "_real_stdout", out)
+    transport = StdioTransport(lambda: out, threading.Lock())
 
     threads = [
-        threading.Thread(target=server.write_json, args=({"seq": i, "text": "x" * 24},))
+        threading.Thread(target=transport.write, args=({"seq": i, "text": "x" * 24},))
         for i in range(8)
     ]
 

@@ -7,6 +7,8 @@ implementation in this same file once that phase ships.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hermes_cli.service_manager import (
@@ -192,16 +194,19 @@ def fake_subprocess_run(monkeypatch: pytest.MonkeyPatch):
 # tests/docker/test_s6_profile_gateway_integration.py.
 
 
-def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
+def test_seed_supervise_skeleton_creates_expected_layout(tmp_path, monkeypatch) -> None:
     """Verifies the dirs + FIFO + modes the helper lays down."""
     import stat
 
-    from hermes_cli.service_manager import _seed_supervise_skeleton
+    import hermes_cli.service_manager as service_manager
+
+    monkeypatch.setattr(service_manager, "_HERMES_UID", os.getuid())
+    monkeypatch.setattr(service_manager, "_HERMES_GID", os.getgid())
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
 
-    _seed_supervise_skeleton(svc_dir)
+    service_manager._seed_supervise_skeleton(svc_dir)
 
     # Top-level event/ — s6-svlisten1 event subscription dir.
     event = svc_dir / "event"

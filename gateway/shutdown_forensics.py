@@ -203,9 +203,8 @@ def spawn_async_diagnostic(
     """Fire-and-forget ``ps``-style snapshot written to ``log_path``.
 
     Runs as a detached subprocess so it can't block the asyncio event loop
-    or compete with platform teardown.  The subprocess uses its own
-    ``timeout`` so a wedged ``ps`` still self-cleans within
-    ``timeout_seconds``.
+    or compete with platform teardown. A tiny Python supervisor enforces the
+    timeout without requiring the GNU ``timeout`` utility.
 
     Returns the subprocess PID on success, ``None`` on failure.  Never
     raises.
@@ -226,18 +225,37 @@ def spawn_async_diagnostic(
     if sys.platform == "win32":
         return None
 
+    if sys.platform == "darwin":
+        probes = (
+            "echo '--- ps aux (first 60) ---'; ps aux 2>/dev/null | head -60; "
+            "echo '--- uptime ---'; uptime 2>/dev/null || true; "
+            "echo '--- vm.loadavg ---'; sysctl -n vm.loadavg 2>/dev/null || true; "
+            "echo '--- vm.swapusage ---'; sysctl -n vm.swapusage 2>/dev/null || true; "
+        )
+    else:
+        probes = (
+            "echo '--- ps auxf (top 60 by cpu) ---'; "
+            "ps auxf --sort=-pcpu 2>/dev/null | head -60; "
+            "echo '--- pstree of self ---'; "
+            f"pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
+            "echo '--- /proc/loadavg ---'; cat /proc/loadavg 2>/dev/null || true; "
+            "echo '--- recent dmesg (oom/killed) ---'; "
+            "dmesg -T 2>/dev/null | tail -20 || "
+            "journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
+        )
     script = (
         f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
         "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
-        "echo '--- ps auxf (top 60 by cpu) ---'; "
-        "ps auxf --sort=-pcpu 2>/dev/null | head -60; "
-        "echo '--- pstree of self ---'; "
-        f"pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
-        "echo '--- /proc/loadavg ---'; "
-        "cat /proc/loadavg 2>/dev/null || true; "
-        "echo '--- recent dmesg (oom/killed) ---'; "
-        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
+        f"{probes}"
         "echo '=== end ==='"
+    )
+    supervisor = (
+        "import subprocess, sys\n"
+        "try:\n"
+        " subprocess.run(['bash', '-c', sys.argv[1]], "
+        "timeout=float(sys.argv[2]), check=False)\n"
+        "except subprocess.TimeoutExpired:\n"
+        " pass\n"
     )
 
     try:
@@ -255,7 +273,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            [sys.executable, "-c", supervisor, script, str(timeout_seconds)],
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
