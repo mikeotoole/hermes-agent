@@ -308,10 +308,15 @@ def test_fence_cancelled_compression_leaves_lock_reacquirable(tmp_path: Path) ->
 
     worker = threading.Thread(target=_run_compression, name="fenced-hygiene")
     worker.start()
-    assert summary_started.wait(timeout=2)
-    assert fence.cancel_before_commit() is True
-    release_summary.set()
-    worker.join(timeout=5)
+    try:
+        # Agent-side setup can include lazy plugin/tool discovery under a cold,
+        # loaded suite. The contract starts once compression reaches the mocked
+        # summary, not within an arbitrary two-second startup budget.
+        assert summary_started.wait(timeout=10)
+        assert fence.cancel_before_commit() is True
+    finally:
+        release_summary.set()
+        worker.join(timeout=10)
     assert not worker.is_alive()
 
     # Cancelled attempt: no mutation, and — the invariant under test — the
