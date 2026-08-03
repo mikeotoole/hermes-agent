@@ -1008,34 +1008,36 @@ class TestShutdown:
         """Multiple servers are shut down in parallel via asyncio.gather."""
         import tools.mcp_tool as mcp_mod
         from tools.mcp_tool import shutdown_mcp_servers, _servers
-        import time
 
         _servers.clear()
 
-        # 4 servers each taking 50ms to shut down
-        delay = 0.05
+        started = []
+        overlap_counts = []
         for i in range(4):
             mock_server = MagicMock()
             mock_server.name = f"srv_{i}"
-            async def slow_shutdown():
-                await asyncio.sleep(delay)
+
+            async def slow_shutdown(name=f"srv_{i}"):
+                started.append(name)
+                # gather() starts every coroutine before any resumes after this
+                # yield. A serial await loop would observe 1, 2, 3, 4 instead.
+                await asyncio.sleep(0)
+                overlap_counts.append(len(started))
+
             mock_server.shutdown = slow_shutdown
             _servers[f"srv_{i}"] = mock_server
 
         mcp_mod._ensure_mcp_loop()
         try:
-            start = time.monotonic()
             shutdown_mcp_servers()
-            elapsed = time.monotonic() - start
         finally:
             mcp_mod._mcp_loop = None
             mcp_mod._mcp_thread = None
 
         assert len(_servers) == 0
-        # Parallel: ~1 delay, not 4. Margin covers scheduling jitter but stays
-        # well under the serial total.
-        assert elapsed < delay * 3, (
-            f"Shutdown took {elapsed:.3f}s, expected ~{delay}s (parallel)"
+        assert len(started) == 4
+        assert overlap_counts == [4, 4, 4, 4], (
+            f"shutdown coroutines did not overlap: {overlap_counts}"
         )
 
 
