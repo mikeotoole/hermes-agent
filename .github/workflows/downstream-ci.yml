@@ -31,8 +31,10 @@ jobs:
       - name: Install locked development environment
         run: |
           python -m pip install uv==0.11.2
-          uv sync --locked --python 3.11 --extra all --extra dev
+          uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
       - name: Run canonical Python suite
+        env:
+          HERMES_TEST_FILE_RETRIES: "0"
         run: scripts/run_tests.sh --slice "${{ matrix.slice }}/4" -j 4
 
   node:

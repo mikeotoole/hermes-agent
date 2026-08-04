@@ -31,10 +31,32 @@ Fork `main` may be synced separately by exact fast-forward only. Never merge or 
 
 ## Current release candidate
 
-- Upstream version line: Hermes Agent v0.19.0, official tag `v2026.7.20`.
-- Accepted downstream code head: `e2f27bcdbf491bb367b4f8a0fd2863efa6bb4a7e`.
-- Accepted behavior: ordered OpenAI commentary during tool calls, reconnect survival, and AgentCTRL compatibility.
-- Packaging may add only reviewed governance/release metadata. Runtime-source bytes must remain identical to the accepted code head.
+- Upstream version line: Hermes Agent v0.19.1, official tag `v2026.7.30`.
+- Dereferenced upstream commit: `cc4cab2f592e60a197e796506de9168f74baf3ea`.
+- Linear release-import commit: `0d85d261fd5185e88c22b758180a0d18344ed8ef` (tree-identical to the official tag, parented by the prior protected downstream release).
+- Accepted downstream runtime head: `a90d2013ef487c3d66de38729631ada07e4bb5d3`.
+- Reviewed source candidate: `216ddf8a6f534434d0bd040a00c431f1ff20a65d`, tree `0914c491416258ab479c68387293bdc85f5e22fb`.
+- Candidate branch: `release/lagoon-2026.08.02.1-promote`.
+- Candidate tag: `lagoon/2026.08.02.1`.
+- Accepted behavior: ordered interim commentary during tool calls, reconnect survival in Desktop and TUI, AgentCTRL compatibility, and deterministic macOS release verification without weakening Linux behavior.
+- Ordered carried commits:
+  1. `f1fae872961a73c041fee6bb0822b7a48e23e0f1` — backend interim segments and reconnect snapshot contracts;
+  2. `ceb42ae72bc5ca4bbf21ae7a333f46cd2aa6a998` — per-turn callback snapshotting;
+  3. `1a814b7af36754f399e78ca84cbea352acb1de71` — Desktop reconnect restoration;
+  4. `81921a6615cbdb56c8799ff55ad24018c3c73d54` — TUI reconnect restoration;
+  5. `61a6ea802844fd272e627972dd5c7fbbd744dd6e` — UTF-16 boundary ordering across reconnect;
+  6. `cfb88c1fac4667b939b0e40b6ec1025e01993acb` — upstream EOL-only churn detection fix;
+  7. `949b4403593da134d370b3119c360668b3164a0b` — upstream racy-Git determinism coverage;
+  8. `b400b932daa695c3d22099ae632e606f52e76d2a` — macOS runtime portability and hermetic release gates.
+- Release stabilization commits:
+  1. `adc528881b80b59349ffbcc6904b01db5779e400` — timing-sensitive release gates;
+  2. `fbd77b756b6ea2a99f46101eb70365918fe5de75` — deterministic parallel MCP shutdown coverage;
+  3. `54719a2e01dd5caa6bb3c231264fdc83c41bf4e9` — synchronized stale-watchdog coverage;
+  4. `590ced8b500f1ce6f5fe9e19a303e7273fffae23` — synchronized compression-fence coverage;
+  5. `54f47197783b97c86fa707af4cc2e8c1e31f4995` — loaded-suite runtime and harness stabilization;
+  6. `a90d2013ef487c3d66de38729631ada07e4bb5d3` — deterministic off-loop cleanup coverage.
+- Runtime equivalence: before packaging, every non-governance path is byte-identical to the reviewed source candidate.
+- Packaging may change only `.github/workflows/downstream-ci.yml`, `DOWNSTREAM.md`, and `contributors/emails/mike@otoole.io`. Every other path must remain byte-identical to the accepted runtime head.
 
 ## Patch lifecycle
 

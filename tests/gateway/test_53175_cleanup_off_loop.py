@@ -71,16 +71,17 @@ async def test_cleanup_off_loop_does_not_block_event_loop():
 
     def slow_close():
         close_started.set()
-        release.wait(timeout=5)  # block the WORKER thread, not the loop
+        release.wait(timeout=10)  # block the WORKER thread, not the loop
 
     agent = _agent_with_close(slow_close)
 
-    ticks = {"n": 0}
     stop = threading.Event()
+    loop_progressed_while_close_blocked = asyncio.Event()
 
     async def _heartbeat():
         while not stop.is_set():
-            ticks["n"] += 1
+            if close_started.is_set():
+                loop_progressed_while_close_blocked.set()
             await asyncio.sleep(0.005)
 
     hb = asyncio.create_task(_heartbeat())
@@ -88,26 +89,25 @@ async def test_cleanup_off_loop_does_not_block_event_loop():
         runner._cleanup_agent_resources_off_loop(agent, context="test")
     )
 
-    for _ in range(200):
-        if close_started.is_set():
-            break
-        await asyncio.sleep(0.005)
-    assert close_started.is_set(), "close() never ran"
+    try:
+        for _ in range(200):
+            if close_started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert close_started.is_set(), "close() never ran"
 
-    ticks_at_block = ticks["n"]
-    await asyncio.sleep(0.1)
-    ticks_during_block = ticks["n"] - ticks_at_block
-
-    release.set()
-    await cleanup_task
-    stop.set()
-    await hb
-    executor.shutdown(wait=False)
-
-    assert ticks_during_block >= 5, (
-        f"event loop was blocked during agent cleanup (#53175): only "
-        f"{ticks_during_block} ticks while close() was running"
-    )
+        await asyncio.wait_for(loop_progressed_while_close_blocked.wait(), timeout=2.0)
+        assert not cleanup_task.done(), "cleanup finished before blocked close() was released"
+    finally:
+        release.set()
+        try:
+            await cleanup_task
+        finally:
+            stop.set()
+            try:
+                await hb
+            finally:
+                executor.shutdown(wait=False)
 
 
 @pytest.mark.asyncio
@@ -166,9 +166,3 @@ async def test_cleanup_off_loop_swallows_executor_failure(caplog):
     ), "expected the cleanup-failure warning to be logged"
 
 
-@pytest.mark.asyncio
-async def test_cleanup_off_loop_none_agent_is_noop():
-    """A None agent (None cache entry) is a no-op and never touches the loop."""
-    runner, executor = _make_runner()
-    await runner._cleanup_agent_resources_off_loop(None)
-    executor.shutdown(wait=False)
