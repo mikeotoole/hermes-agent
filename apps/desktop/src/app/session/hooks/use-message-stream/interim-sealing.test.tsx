@@ -9,8 +9,6 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
 
-import { appendLiveSessionProjection } from '../use-session-actions/utils'
-
 import { useMessageStream } from './index'
 
 const SID = 'session-1'
@@ -22,7 +20,7 @@ let mockHaptic: ReturnType<typeof vi.fn>
 
 function Harness() {
   const activeSessionIdRef = useRef<string | null>(SID)
-  const sessionStateByRuntimeIdRef = useRef(new Map(sessionStates))
+  const sessionStateByRuntimeIdRef = useRef(new Map<string, ClientSessionState>())
   const queryClientRef = useRef(new QueryClient())
 
   const stream = useMessageStream({
@@ -49,8 +47,8 @@ function Harness() {
   return null
 }
 
-async function mountStream(initialState?: ClientSessionState) {
-  sessionStates = initialState ? new Map([[SID, initialState]]) : new Map()
+async function mountStream() {
+  sessionStates = new Map()
   render(<Harness />)
   await waitFor(() => expect(handleEvent).not.toBeNull())
 }
@@ -58,19 +56,8 @@ async function mountStream(initialState?: ClientSessionState) {
 const start = () => act(() => handleEvent!({ payload: {}, session_id: SID, type: 'message.start' }))
 const delta = (text: string) => act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.delta' }))
 
-const interim = (text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) =>
-  act(() =>
-    handleEvent!({
-      payload: {
-        text,
-        already_streamed: alreadyStreamed,
-        ...(segmentId ? { segment_id: segmentId } : {}),
-        ...(assistantPrefix === undefined ? {} : { assistant_prefix: assistantPrefix })
-      },
-      session_id: SID,
-      type: 'message.interim'
-    })
-  )
+const interim = (text: string) =>
+  act(() => handleEvent!({ payload: { text, already_streamed: true }, session_id: SID, type: 'message.interim' }))
 
 const complete = (text: string) =>
   act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.complete' }))
@@ -124,52 +111,34 @@ describe('useMessageStream interim text sealing', () => {
     expect(texts).toContain('All checks passed.')
   })
 
-  it('dedupes a live interim replay already restored from the reconnect snapshot', async () => {
-    const messages = appendLiveSessionProjection([], {
-      session_id: SID,
-      inflight: {
-        user: 'current prompt',
-        streaming: true,
-        interim: [
-          {
-            segment_id: 'stable-1',
-            text: 'checkpoint',
-            already_streamed: false
-          }
-        ]
-      }
-    })
-
-    await mountStream({ ...createClientSessionState(), busy: true, messages })
-
-    await interim('checkpoint', 'stable-1')
-
-    expect(assistantMessages().filter(text => text === 'checkpoint')).toHaveLength(1)
-    expect(getState().messages.filter(message => message.id === 'assistant-interim-stable-1')).toHaveLength(1)
-  })
-
-  it('keeps non-streamed interim commentary distinct from streamed text', async () => {
+  it('marks sealed interim bubbles interim and leaves the final reply unmarked', async () => {
     await mountStream()
     await start()
-    await delta('streamed prefix')
 
-    await interim('tool-call commentary', 'stable-commentary', false)
+    await delta('Let me check the files.')
+    await interim('Let me check the files.')
+    await delta('Now the second pass.')
+    await interim('Now the second pass.')
+    await complete('All done.')
 
-    expect(assistantMessages()).toEqual(['streamed prefix', 'tool-call commentary'])
-    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-commentary')).toBe(true)
+    const assistants = getState().messages.filter(m => m.role === 'assistant' && !m.hidden)
+    const byText = (text: string) => assistants.find(m => chatMessageText(m) === text)
+
+    expect(byText('Let me check the files.')?.interim).toBe(true)
+    expect(byText('Now the second pass.')?.interim).toBe(true)
+    expect(byText('All done.')?.interim).toBeFalsy()
   })
 
-  it('keeps ordinary streamed text before already-streamed commentary', async () => {
+  it('clears the interim mark when a previewed final settles onto the interim bubble', async () => {
     await mountStream()
     await start()
-    await delta('ordinary prefixstreamed commentary')
 
-    await interim('streamed commentary', 'stable-streamed-commentary', true, 'ordinary prefixstreamed commentary')
+    await interim('same reply')
+    await completePreviewed('same reply')
 
-    expect(assistantMessages()).toEqual(['ordinary prefix', 'streamed commentary'])
-    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-streamed-commentary')).toBe(
-      true
-    )
+    const assistants = getState().messages.filter(m => m.role === 'assistant' && !m.hidden)
+    expect(assistants).toHaveLength(1)
+    expect(assistants[0].interim).toBeFalsy()
   })
 
   it('dedupes interim text when the final response includes it', async () => {
@@ -217,18 +186,51 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(true)
   })
 
-  it('keeps an identical final completion distinct from an interim reply without response_previewed', async () => {
+  it('settles an identical final onto a non-previewed interim (tool-call turn) instead of duplicating (#63679)', async () => {
     await mountStream()
     await start()
 
+    // A plain tool-call turn: the streamed text is sealed as an interim at the
+    // tool boundary (no response_previewed — that flag is only for verify-on-
+    // stop). The final completion is the SAME turn's reply. It must settle onto
+    // the interim, not append a second bubble — the DB has one row. This is the
+    // "renders twice" bug: partial streamed copy + clean final copy side by side.
     await interim('same reply')
     await complete('same reply')
 
-    // Without response_previewed, the interim and terminal replies are
-    // distinct messages — the gateway didn't signal that the final reuses
-    // the provisional candidate.
     const texts = assistantMessages()
-    expect(texts.filter(t => t === 'same reply')).toHaveLength(2)
+    expect(texts.filter(t => t === 'same reply')).toHaveLength(1)
+  })
+
+  it('settles a prefix-extended final onto a non-previewed interim (streamed + trailing delta)', async () => {
+    await mountStream()
+    await start()
+
+    // The stream dropped/settled early at the tool boundary; the final adds a
+    // trailing delta. Same turn — one bubble with the full final text.
+    await delta('partial')
+    await interim('partial')
+    await complete('partial answer continued')
+
+    const texts = assistantMessages()
+    expect(texts.filter(t => t.includes('partial'))).toHaveLength(1)
+    expect(texts[0]).toBe('partial answer continued')
+  })
+
+  it('appends a genuinely different final as its own bubble (two real assistant segments)', async () => {
+    await mountStream()
+    await start()
+
+    // The interim is one segment (pre-tool commentary); the final is different
+    // content, not a continuation of it. These are two real messages and must
+    // both render — the fix must not over-collapse distinct replies.
+    await interim('let me check the files')
+    await complete('the answer is 42')
+
+    const texts = assistantMessages()
+    expect(texts).toContain('let me check the files')
+    expect(texts).toContain('the answer is 42')
+    expect(texts).toHaveLength(2)
   })
 
   it('settles an identical final completion onto the interim when response_previewed', async () => {
