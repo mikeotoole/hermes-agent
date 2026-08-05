@@ -9,6 +9,8 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
 
+import { appendLiveSessionProjection } from '../use-session-actions/utils'
+
 import { useMessageStream } from './index'
 
 const SID = 'session-1'
@@ -20,7 +22,7 @@ let mockHaptic: ReturnType<typeof vi.fn>
 
 function Harness() {
   const activeSessionIdRef = useRef<string | null>(SID)
-  const sessionStateByRuntimeIdRef = useRef(new Map<string, ClientSessionState>())
+  const sessionStateByRuntimeIdRef = useRef(new Map(sessionStates))
   const queryClientRef = useRef(new QueryClient())
 
   const stream = useMessageStream({
@@ -47,8 +49,8 @@ function Harness() {
   return null
 }
 
-async function mountStream() {
-  sessionStates = new Map()
+async function mountStream(initialState?: ClientSessionState) {
+  sessionStates = initialState ? new Map([[SID, initialState]]) : new Map()
   render(<Harness />)
   await waitFor(() => expect(handleEvent).not.toBeNull())
 }
@@ -56,8 +58,19 @@ async function mountStream() {
 const start = () => act(() => handleEvent!({ payload: {}, session_id: SID, type: 'message.start' }))
 const delta = (text: string) => act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.delta' }))
 
-const interim = (text: string) =>
-  act(() => handleEvent!({ payload: { text, already_streamed: true }, session_id: SID, type: 'message.interim' }))
+const interim = (text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) =>
+  act(() =>
+    handleEvent!({
+      payload: {
+        text,
+        already_streamed: alreadyStreamed,
+        ...(segmentId ? { segment_id: segmentId } : {}),
+        ...(assistantPrefix === undefined ? {} : { assistant_prefix: assistantPrefix })
+      },
+      session_id: SID,
+      type: 'message.interim'
+    })
+  )
 
 const complete = (text: string) =>
   act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.complete' }))
@@ -109,6 +122,68 @@ describe('useMessageStream interim text sealing', () => {
     const texts = assistantMessages()
     expect(texts).toContain('awaaaaa clean!! tsc zero errors')
     expect(texts).toContain('All checks passed.')
+  })
+
+  it('dedupes a live interim replay already restored from the reconnect snapshot', async () => {
+    const messages = appendLiveSessionProjection([], {
+      session_id: SID,
+      inflight: {
+        user: 'current prompt',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-1',
+            text: 'checkpoint',
+            already_streamed: false
+          }
+        ]
+      }
+    })
+
+    await mountStream({ ...createClientSessionState(), busy: true, messages })
+
+    await interim('checkpoint', 'stable-1')
+
+    expect(assistantMessages().filter(text => text === 'checkpoint')).toHaveLength(1)
+    expect(getState().messages.filter(message => message.id === 'assistant-interim-stable-1')).toHaveLength(1)
+  })
+
+  it('keeps non-streamed interim commentary distinct from streamed text', async () => {
+    await mountStream()
+    await start()
+    await delta('streamed prefix')
+
+    await interim('tool-call commentary', 'stable-commentary', false)
+
+    expect(assistantMessages()).toEqual(['streamed prefix', 'tool-call commentary'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-commentary')).toBe(true)
+  })
+
+  it('keeps ordinary streamed text before already-streamed commentary', async () => {
+    await mountStream()
+    await start()
+    await delta('ordinary prefixstreamed commentary')
+
+    await interim('streamed commentary', 'stable-streamed-commentary', true, 'ordinary prefixstreamed commentary')
+
+    expect(assistantMessages()).toEqual(['ordinary prefix', 'streamed commentary'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-streamed-commentary')).toBe(
+      true
+    )
+  })
+
+  it('seals later streamed commentary when the gateway prefix includes earlier sealed segments', async () => {
+    await mountStream()
+    await start()
+
+    await delta('first segment')
+    await interim('first segment', 'stable-first', true, 'first segment')
+    await delta('second segment')
+    await interim('second segment', 'stable-second', true, 'first segmentsecond segment')
+    await complete('final answer')
+
+    expect(assistantMessages()).toEqual(['first segment', 'second segment', 'final answer'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-second')).toBe(true)
   })
 
   it('marks sealed interim bubbles interim and leaves the final reply unmarked', async () => {

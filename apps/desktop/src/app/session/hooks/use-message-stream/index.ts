@@ -405,16 +405,24 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string) => {
+    (sessionId: string, text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
         }
 
         const authoritativeText = renderMediaTags(text).trim()
+        const stableMessageId = segmentId ? `assistant-interim-${segmentId}` : null
+        const renderedPrefix = assistantPrefix === undefined ? null : renderMediaTags(assistantPrefix).trim()
 
         if (!authoritativeText) {
           return state
+        }
+
+        if (stableMessageId && state.messages.some(message => message.id === stableMessageId)) {
+          return state.interimBoundaryPending
+            ? state
+            : { ...state, interimBoundaryPending: true, sawAssistantPayload: true }
         }
 
         const streamId = state.streamId
@@ -427,18 +435,75 @@ export function useMessageStream({
 
         let nextMessages = state.messages
 
-        if (streamId && nextMessages.some(m => m.id === streamId)) {
-          // Seal the streaming bubble in place, marked interim so it renders
-          // without an action footer (see ChatMessage.interim).
-          nextMessages = nextMessages.map(m =>
-            m.id === streamId ? { ...m, parts: replaceTextPart(m.parts), pending: false, interim: true } : m
-          )
+        const streamMessage = streamId ? nextMessages.find(message => message.id === streamId) : undefined
+        const hasStreamMessage = Boolean(streamMessage)
+
+        if (streamId && hasStreamMessage && alreadyStreamed) {
+          const streamedText = chatMessageText(streamMessage!).trim()
+
+          if (
+            renderedPrefix !== null &&
+            (!renderedPrefix.endsWith(authoritativeText) ||
+              !renderedPrefix.endsWith(streamedText) ||
+              !streamedText.endsWith(authoritativeText))
+          ) {
+            return state
+          }
+
+          // `assistant_prefix` is cumulative for the whole agent turn, while
+          // `streamMessage` starts fresh after each sealed interim boundary.
+          // Compare/split the open suffix rather than requiring it to equal the
+          // full cumulative prefix, or every boundary after the first is dropped.
+          const leadingText =
+            renderedPrefix === null ? '' : streamedText.slice(0, streamedText.length - authoritativeText.length)
+
+          if (leadingText) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId
+                ? {
+                    ...message,
+                    parts: mergeFinalAssistantText(message.parts, leadingText),
+                    pending: false
+                  }
+                : message
+            )
+            nextMessages = [
+              ...nextMessages,
+              {
+                id: stableMessageId ?? nextStreamMessageId('assistant-interim'),
+                role: 'assistant' as const,
+                parts: [assistantTextPart(authoritativeText)],
+                pending: false,
+                interim: true,
+                branchGroupId: state.pendingBranchGroup ?? undefined
+              }
+            ]
+          } else {
+            nextMessages = nextMessages.map(m =>
+              m.id === streamId
+                ? {
+                    ...m,
+                    ...(stableMessageId ? { id: stableMessageId } : {}),
+                    parts: replaceTextPart(m.parts),
+                    pending: false,
+                    interim: true
+                  }
+                : m
+            )
+          }
         } else {
-          // No streaming bubble — create a standalone interim message
+          // Commentary that was not emitted through message.delta is its own
+          // boundary. Preserve any preceding stream instead of replacing it.
+          if (streamId && hasStreamMessage) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId ? { ...message, pending: false } : message
+            )
+          }
+
           nextMessages = [
             ...nextMessages,
             {
-              id: nextStreamMessageId('assistant-interim'),
+              id: stableMessageId ?? nextStreamMessageId('assistant-interim'),
               role: 'assistant' as const,
               parts: [assistantTextPart(authoritativeText)],
               pending: false,

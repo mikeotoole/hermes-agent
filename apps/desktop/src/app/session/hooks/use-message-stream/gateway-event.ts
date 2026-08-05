@@ -172,7 +172,13 @@ interface GatewayEventDeps {
   ) => void
   failAssistantMessage: (sessionId: string, errorMessage: string) => void
   flushQueuedDeltas: (sessionId?: string) => void
-  finalizeInterimAssistantMessage: (sessionId: string, text: string) => void
+  finalizeInterimAssistantMessage: (
+    sessionId: string,
+    text: string,
+    segmentId?: string,
+    alreadyStreamed?: boolean,
+    assistantPrefix?: string
+  ) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   sessionInterrupted: (sessionId: string) => boolean
@@ -560,9 +566,12 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         if (sessionId) {
           flushQueuedDeltas(sessionId)
           const text = coerceGatewayText(payload?.text)
+          const segmentId = typeof payload?.segment_id === 'string' ? payload.segment_id.trim() : ''
+          const alreadyStreamed = payload?.already_streamed !== false
+          const assistantPrefix = typeof payload?.assistant_prefix === 'string' ? payload.assistant_prefix : undefined
 
           if (text) {
-            finalizeInterimAssistantMessage(sessionId, text)
+            finalizeInterimAssistantMessage(sessionId, text, segmentId || undefined, alreadyStreamed, assistantPrefix)
           }
         }
       } else if (event.type === 'thinking.delta') {

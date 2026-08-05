@@ -309,10 +309,7 @@ async def handle_ws(ws: Any) -> None:
                 "method": "event",
                 "params": {
                     "type": "gateway.ready",
-                    # change_events: this backend broadcasts pet.changed /
-                    # cron.changed / sessions.changed, so clients can demote
-                    # their legacy polls to slow backstops.
-                    "payload": {"skin": server.resolve_skin(), "change_events": True},
+                    "payload": server.gateway_ready_payload(),
                 },
             }
         )

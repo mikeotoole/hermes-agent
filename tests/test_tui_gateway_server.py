@@ -4547,6 +4547,65 @@ class _RecordingAgent:
         return {"final_response": "", "messages": []}
 
 
+def test_run_prompt_submit_snapshots_interim_callback_for_reconnect(
+    monkeypatch, tmp_path
+):
+    _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_load_interim_assistant_messages", lambda: True)
+    emitted = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload)),
+    )
+    snapshots = []
+
+    class _InterimAgent(_RecordingAgent):
+        interim_assistant_callback = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            **_kwargs,
+        ):
+            self._turns.append(prompt)
+            self.interim_assistant_callback(
+                "checkpoint", already_streamed=False
+            )
+            snapshots.append(server._inflight_snapshot(session))
+            return {"final_response": "", "messages": []}
+
+    turns = []
+    agent = _InterimAgent(turns)
+    session = _session(agent=agent, running=True)
+    sid = "sid-interim-reconnect"
+    server._sessions[sid] = session
+
+    try:
+        server._run_prompt_submit("rid-interim", sid, session, "prompt")
+    finally:
+        server._sessions.pop(sid, None)
+
+    interim_events = [event for event in emitted if event[0] == "message.interim"]
+    assert len(interim_events) == 1
+    payload = interim_events[0][2]
+    assert payload["text"] == "checkpoint"
+    assert payload["already_streamed"] is False
+    assert isinstance(payload["segment_id"], str) and payload["segment_id"]
+    assert payload["assistant_prefix"] == ""
+    assert snapshots[0]["interim"] == [
+        {
+            "already_streamed": False,
+            "assistant_offset": 0,
+            "segment_id": payload["segment_id"],
+            "text": "checkpoint",
+        }
+    ]
+    assert turns == ["prompt"]
+
+
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_run_prompt_submit_requeues_foreign_completion(
     monkeypatch, tmp_path, exit_code
