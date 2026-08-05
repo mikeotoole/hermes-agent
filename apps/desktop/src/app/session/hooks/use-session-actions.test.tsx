@@ -760,8 +760,15 @@ describe('resumeSession failure recovery', () => {
           running: true,
           inflight: {
             user: 'current prompt',
-            assistant: 'partial answer',
-            streaming: true
+            assistant: 'checkpointpartial answer',
+            streaming: true,
+            interim: [
+              {
+                segment_id: 'stable-1',
+                text: 'checkpoint',
+                already_streamed: true
+              }
+            ]
           },
           queued: { user: 'newest prompt' },
           info: {}
@@ -785,8 +792,10 @@ describe('resumeSession failure recovery', () => {
 
     const renderedMessages = JSON.stringify(resumedState?.messages)
     expect(renderedMessages).toContain('current prompt')
+    expect(renderedMessages).toContain('checkpoint')
     expect(renderedMessages).toContain('partial answer')
     expect(renderedMessages).toContain('newest prompt')
+    expect(resumedState?.interimBoundaryPending).toBe(true)
   })
 
   it('uses the continuation projection when resume rotates an equal-length stored transcript', async () => {

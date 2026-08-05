@@ -79,6 +79,7 @@ import {
   applyStoredSessionPreviewRuntimeInfo,
   type BranchMessage,
   chatMessageArraysEquivalent,
+  hasLiveInterimProjection,
   isSessionGoneError,
   patchSessionWorkspace,
   preserveLocalPendingTurnMessages,
@@ -990,6 +991,7 @@ export function useSessionActions({
             messages: messagesForView,
             busy: resumedRunning,
             awaitingResponse: resumedRunning && !recoveredInFlightTail,
+            interimBoundaryPending: hasLiveInterimProjection(resumed.inflight),
             ...(inFlightRecovery.applied
               ? {
                   sawAssistantPayload: true,

@@ -94,6 +94,40 @@ describe('createGatewayEventHandler', () => {
     expect(getTurnState().todos).toEqual([])
   })
 
+  it('preserves successive interim boundaries when assistant_prefix is cumulative', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({ payload: {}, type: 'message.start' } as any)
+    onEvent({ payload: { text: 'first segment' }, type: 'message.delta' } as any)
+    onEvent({
+      payload: {
+        already_streamed: true,
+        assistant_prefix: 'first segment',
+        segment_id: 'segment-1',
+        text: 'first segment'
+      },
+      type: 'message.interim'
+    } as any)
+    onEvent({ payload: { text: 'second segment' }, type: 'message.delta' } as any)
+    onEvent({
+      payload: {
+        already_streamed: true,
+        assistant_prefix: 'first segmentsecond segment',
+        segment_id: 'segment-2',
+        text: 'second segment'
+      },
+      type: 'message.interim'
+    } as any)
+    onEvent({ payload: { text: 'final response' }, type: 'message.complete' } as any)
+
+    expect(appended.filter(message => message.role === 'assistant').map(message => message.text)).toEqual([
+      'first segment',
+      'second segment',
+      'final response'
+    ])
+  })
+
   it('opens a billing confirm dialog routing Nous to /topup', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)
@@ -1917,6 +1951,62 @@ describe('createGatewayEventHandler', () => {
       // Turn is still active — busy stays true, no completion messages appended
       expect(getUiState().busy).toBe(true)
       expect(appended).toHaveLength(0)
+    })
+
+    it('dedupes repeated live interim events by stable segment id', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['checkpoint'])
+    })
+
+    it('keeps non-streamed interim commentary distinct from streamed text', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'streamed prefix' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-commentary', text: 'tool-call commentary' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'streamed prefix',
+        'tool-call commentary'
+      ])
+    })
+
+    it('keeps ordinary streamed text before already-streamed commentary', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'ordinary prefixstreamed commentary' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'ordinary prefixstreamed commentary',
+          segment_id: 'stable-streamed-commentary',
+          text: 'streamed commentary'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'ordinary prefix',
+        'streamed commentary'
+      ])
     })
 
     it('keeps identical interim and terminal replies as separate messages without response_previewed', () => {

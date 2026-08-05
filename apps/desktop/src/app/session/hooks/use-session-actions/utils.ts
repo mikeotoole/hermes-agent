@@ -609,6 +609,46 @@ export function preserveLocalPendingTurnMessages(
   return preserved.length ? [...withReplacements, ...preserved] : withReplacements
 }
 
+
+interface LiveInterimSegment {
+  alreadyStreamed: boolean
+  assistantOffset: null | number
+  segmentId: string
+  text: string
+}
+
+function liveInterimSegments(inflight: SessionResumeResponse['inflight']): LiveInterimSegment[] {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const segment = raw as Record<string, unknown>
+
+        const assistantOffset =
+          typeof segment.assistant_offset === 'number' &&
+          Number.isInteger(segment.assistant_offset) &&
+          segment.assistant_offset >= 0
+            ? segment.assistant_offset
+            : null
+
+        const segmentId = typeof segment.segment_id === 'string' ? segment.segment_id.trim() : ''
+        const text = typeof segment.text === 'string' ? segment.text : ''
+
+        return segmentId && text
+          ? [{ alreadyStreamed: Boolean(segment.already_streamed), assistantOffset, segmentId, text }]
+          : []
+      })
+    : []
+}
+
+export function hasLiveInterimProjection(inflight: SessionResumeResponse['inflight']): boolean {
+  return liveInterimSegments(inflight).length > 0
+}
+
 /**
  * Append the backend-only tail of a live turn to a stored transcript.
  *
@@ -637,6 +677,7 @@ export function appendLiveSessionProjection(
   // failure on the projected row instead of rendering the partial as healthy.
   const inflightError = projection.inflight?.error?.trim() ?? ''
   const queuedUser = projection.queued?.user?.trim() ?? ''
+  const inflightInterim = liveInterimSegments(projection.inflight)
 
   if (
     !inflightUser &&
@@ -644,13 +685,30 @@ export function appendLiveSessionProjection(
     !inflightStreaming &&
     !inflightError &&
     !queuedUser &&
-    !inflightCorrections.length
+    !inflightCorrections.length &&
+    !inflightInterim.length
   ) {
     return messages
   }
 
   const sessionId = projection.session_id || 'session'
   const projected: ChatMessage[] = []
+  let assistantCursor = 0
+  let streamChunkIndex = 0
+
+  const pushStreamChunk = (text: string) => {
+    if (!text) {
+      return
+    }
+
+    projected.push({
+      id: `assistant-stream-${sessionId}-${streamChunkIndex++}`,
+      role: 'assistant',
+      parts: [assistantTextPart(text)],
+      pending: false
+    })
+  }
+
   // A turn normally persists its user row before inference begins. session.resume
   // then returns that stored row *and* the still-live inflight projection; adding
   // both makes a backgrounded prompt appear twice when its session is reopened.
@@ -697,6 +755,51 @@ export function appendLiveSessionProjection(
     })
   }
 
+  for (const segment of inflightInterim) {
+    const assistantOffset = segment.assistantOffset
+
+    if (assistantOffset !== null) {
+      if (assistantOffset < assistantCursor || assistantOffset > inflightAssistant.length) {
+        continue
+      }
+
+      if (segment.alreadyStreamed) {
+        const segmentStart = assistantOffset - segment.text.length
+
+        if (segmentStart < assistantCursor || inflightAssistant.slice(segmentStart, assistantOffset) !== segment.text) {
+          continue
+        }
+
+        pushStreamChunk(inflightAssistant.slice(assistantCursor, segmentStart))
+      } else {
+        pushStreamChunk(inflightAssistant.slice(assistantCursor, assistantOffset))
+      }
+
+      assistantCursor = assistantOffset
+    } else if (segment.alreadyStreamed) {
+      if (!inflightAssistant.slice(assistantCursor).startsWith(segment.text)) {
+        continue
+      }
+
+      assistantCursor += segment.text.length
+    } else {
+      // Older gateways did not provide an assistant prefix. Preserve all known
+      // streamed text before non-streamed commentary rather than reversing it.
+      pushStreamChunk(inflightAssistant.slice(assistantCursor))
+      assistantCursor = inflightAssistant.length
+    }
+
+    projected.push({
+      id: `assistant-interim-${segment.segmentId}`,
+      role: 'assistant',
+      parts: [assistantTextPart(segment.text)],
+      pending: false,
+      interim: true
+    })
+  }
+
+  const assistantTail = inflightAssistant.slice(assistantCursor)
+
   // Keep a pending assistant boundary even before the first delta when a
   // queued user turn follows it. This preserves the two distinct turns.
   //
@@ -735,14 +838,14 @@ export function appendLiveSessionProjection(
     isLiveTailRow(liveAssistantOfCurrentTurn)
   )
 
-  if (inflightAssistant || inflightStreaming || inflightError || (inflightUser && queuedUser)) {
+  if (assistantTail || inflightStreaming || inflightError || (inflightUser && queuedUser)) {
     if (turnAlreadyStructured && !inflightError) {
       // Structure is authoritative; skip the text-only dump row.
     } else {
       projected.push({
         id: liveStreamId,
         role: 'assistant',
-        parts: inflightAssistant ? [assistantTextPart(inflightAssistant)] : [],
+        parts: assistantTail ? [assistantTextPart(assistantTail)] : [],
         pending: inflightStreaming,
         ...(inflightError ? { error: inflightError } : {})
       })
