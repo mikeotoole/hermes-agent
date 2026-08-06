@@ -1334,38 +1334,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'message.interim': {
         const text = ev.payload?.text
-        const segmentId = typeof ev.payload?.segment_id === 'string' ? ev.payload.segment_id.trim() : ''
-        const alreadyStreamed = ev.payload?.already_streamed !== false
-
-        const assistantPrefix =
-          typeof ev.payload?.assistant_prefix === 'string' ? ev.payload.assistant_prefix.trimStart() : null
 
         if (typeof text === 'string' && text.trim()) {
-          if (assistantPrefix !== null) {
-            const authoritativeText = text.trimStart()
-            const streamedText = turnController.bufRef.trimStart()
-
-            // `assistant_prefix` is cumulative for the whole turn, while the
-            // controller buffer starts fresh after every sealed interim.
-            if (!assistantPrefix.endsWith(streamedText)) {
-              return
-            }
-
-            if (alreadyStreamed) {
-              if (!assistantPrefix.endsWith(authoritativeText) || !streamedText.endsWith(authoritativeText)) {
-                return
-              }
-
-              const leadingText = streamedText.slice(0, streamedText.length - authoritativeText.length)
-
-              if (leadingText) {
-                turnController.hydrateStreamingText(leadingText)
-                turnController.flushStreamingSegment()
-              }
-            }
-          }
-
-          turnController.recordInterimMessage(text, segmentId || undefined, alreadyStreamed)
+          turnController.recordInterimMessage(text)
         }
 
         return

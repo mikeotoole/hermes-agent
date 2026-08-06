@@ -760,15 +760,8 @@ describe('resumeSession failure recovery', () => {
           running: true,
           inflight: {
             user: 'current prompt',
-            assistant: 'checkpointpartial answer',
-            streaming: true,
-            interim: [
-              {
-                segment_id: 'stable-1',
-                text: 'checkpoint',
-                already_streamed: true
-              }
-            ]
+            assistant: 'partial answer',
+            streaming: true
           },
           queued: { user: 'newest prompt' },
           info: {}
@@ -792,10 +785,8 @@ describe('resumeSession failure recovery', () => {
 
     const renderedMessages = JSON.stringify(resumedState?.messages)
     expect(renderedMessages).toContain('current prompt')
-    expect(renderedMessages).toContain('checkpoint')
     expect(renderedMessages).toContain('partial answer')
     expect(renderedMessages).toContain('newest prompt')
-    expect(resumedState?.interimBoundaryPending).toBe(true)
   })
 
   it('uses the continuation projection when resume rotates an equal-length stored transcript', async () => {
@@ -905,7 +896,7 @@ describe('resumeSession failure recovery', () => {
 
     expect(resumeParams).not.toHaveProperty('lazy')
     expect(resumeParams).not.toHaveProperty('eager_build')
-    expect(resumeParams).toMatchObject({ source: 'desktop' })
+    expect(resumeParams).toMatchObject({ source: 'desktop', omit_messages: true })
   })
 
   it('arms the failure latch when resume succeeds with an empty transcript for a non-empty stored session', async () => {
@@ -1440,6 +1431,10 @@ describe('resumeSession warm-cache mapping integrity', () => {
     expect(methods).toContain('session.activate')
     expect(methods).not.toContain('session.resume')
     expect(getSessionMessages).toHaveBeenCalledWith('stored-A', undefined)
+    expect(requestGateway).toHaveBeenCalledWith(
+      'session.activate',
+      expect.objectContaining({ omit_messages: true, session_id: 'rt-A' })
+    )
     expect(runtimeIdByStoredSessionIdRef.current.get('stored-A')).toBe('rt-A')
   })
 

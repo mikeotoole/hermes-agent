@@ -339,6 +339,7 @@ export interface HermesConfig {
   }
   terminal?: {
     cwd?: string
+    font_family?: string
   }
   stt?: {
     enabled?: boolean
@@ -582,12 +583,6 @@ export interface SessionResumeResponse {
   }
   inflight?: null | {
     assistant?: string
-    interim?: Array<{
-      already_streamed?: boolean
-      assistant_offset?: number
-      segment_id?: string
-      text?: string
-    }>
     /** Mid-turn redirect corrections, oldest first. The turn's original prompt
      *  stays in `user`; these are the follow-ups typed while it ran. */
     corrections?: string[]
@@ -605,6 +600,7 @@ export interface SessionResumeResponse {
   info?: SessionRuntimeInfo
   message_count: number
   messages: SessionMessage[]
+  messages_omitted?: boolean
   resumed: string
   running?: boolean
   session_id: string

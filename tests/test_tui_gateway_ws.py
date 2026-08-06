@@ -4,40 +4,9 @@ import json
 import threading
 import time
 
+from hermes_cli import mcp_startup
 from tui_gateway import server
 from tui_gateway import ws as ws_mod
-
-
-def test_ws_startup_advertises_interim_contracts():
-    frames = []
-
-    class FakeWS:
-        async def accept(self):
-            pass
-
-        async def send_text(self, line):
-            frames.append(server.json.loads(line))
-
-        async def receive_text(self):
-            raise ws_mod._WebSocketDisconnect()
-
-        async def close(self):
-            pass
-
-    server._sessions.clear()
-    server._live_transports.clear()
-    try:
-        asyncio.run(ws_mod.handle_ws(FakeWS()))
-    finally:
-        server._sessions.clear()
-        server._live_transports.clear()
-
-    payload = frames[0]["params"]["payload"]
-    assert payload["capabilities"] == [
-        "message.interim.v1",
-        "inflight.interim.v1",
-    ]
-    assert payload["change_events"] is True
 
 
 
