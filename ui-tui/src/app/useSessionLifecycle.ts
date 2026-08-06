@@ -17,6 +17,7 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import { streamedInterimPrefixLength } from '../lib/interimBoundary.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
@@ -111,13 +112,14 @@ export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn
       }
 
       if (boundary.alreadyStreamed) {
-        const segmentStart = assistantOffset - boundary.text.length
+        const streamedChunk = assistant.slice(assistantCursor, assistantOffset)
+        const overlapLength = streamedInterimPrefixLength(streamedChunk, boundary.text)
 
-        if (segmentStart < assistantCursor || assistant.slice(segmentStart, assistantOffset) !== boundary.text) {
+        if (overlapLength === 0) {
           continue
         }
 
-        turnController.hydrateStreamingText(assistant.slice(assistantCursor, segmentStart))
+        turnController.hydrateStreamingText(streamedChunk.slice(0, streamedChunk.length - overlapLength))
         turnController.flushStreamingSegment()
       } else {
         turnController.hydrateStreamingText(assistant.slice(assistantCursor, assistantOffset))

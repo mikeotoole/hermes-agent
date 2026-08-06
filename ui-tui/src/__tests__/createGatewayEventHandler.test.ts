@@ -128,6 +128,26 @@ describe('createGatewayEventHandler', () => {
     ])
   })
 
+  it('seals the authoritative interim when only its prefix streamed', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({ payload: {}, type: 'message.start' } as any)
+    onEvent({ payload: { text: 'hello' }, type: 'message.delta' } as any)
+    onEvent({
+      payload: {
+        already_streamed: true,
+        assistant_prefix: 'hello',
+        segment_id: 'stable-partial',
+        text: 'hello world'
+      },
+      type: 'message.interim'
+    } as any)
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['hello world'])
+    expect(turnController.bufRef).toBe('')
+  })
+
   it('opens a billing confirm dialog routing Nous to /topup', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)

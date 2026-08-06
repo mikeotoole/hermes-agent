@@ -1047,6 +1047,29 @@ describe('appendLiveSessionProjection', () => {
     expect(restored[3]).toMatchObject({ pending: true })
   })
 
+  it('restores the authoritative interim when only its prefix reached the stream snapshot', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'hello',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-partial',
+            text: 'hello world',
+            already_streamed: true,
+            assistant_offset: 'hello'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.find(message => message.id === 'assistant-interim-stable-partial')).toMatchObject({
+      interim: true,
+      parts: [expect.objectContaining({ text: 'hello world' })]
+    })
+  })
+
   it('restores streamed text on both sides of non-streamed commentary', () => {
     const restored = appendLiveSessionProjection([], {
       session_id: 'runtime-1',

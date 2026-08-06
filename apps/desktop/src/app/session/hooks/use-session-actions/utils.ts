@@ -3,6 +3,7 @@ import { getSession } from '@/hermes'
 import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
+import { streamedInterimPrefixLength } from '@/lib/interim-boundary'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
@@ -764,13 +765,14 @@ export function appendLiveSessionProjection(
       }
 
       if (segment.alreadyStreamed) {
-        const segmentStart = assistantOffset - segment.text.length
+        const streamedChunk = inflightAssistant.slice(assistantCursor, assistantOffset)
+        const overlapLength = streamedInterimPrefixLength(streamedChunk, segment.text)
 
-        if (segmentStart < assistantCursor || inflightAssistant.slice(segmentStart, assistantOffset) !== segment.text) {
+        if (overlapLength === 0) {
           continue
         }
 
-        pushStreamChunk(inflightAssistant.slice(assistantCursor, segmentStart))
+        pushStreamChunk(streamedChunk.slice(0, streamedChunk.length - overlapLength))
       } else {
         pushStreamChunk(inflightAssistant.slice(assistantCursor, assistantOffset))
       }

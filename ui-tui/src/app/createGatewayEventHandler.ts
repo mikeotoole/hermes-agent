@@ -15,6 +15,7 @@ import type {
 } from '../gatewayTypes.js'
 import { billingDialogCopy } from '../lib/billingDialog.js'
 import { relativeLuminance } from '../lib/color.js'
+import { streamedInterimPrefixLength } from '../lib/interimBoundary.js'
 import { isTodoDone } from '../lib/liveProgress.js'
 import { openExternalUrl } from '../lib/openExternalUrl.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
@@ -1352,11 +1353,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             }
 
             if (alreadyStreamed) {
-              if (!assistantPrefix.endsWith(authoritativeText) || !streamedText.endsWith(authoritativeText)) {
+              const overlapLength = streamedInterimPrefixLength(streamedText, authoritativeText)
+
+              if (overlapLength === 0) {
                 return
               }
 
-              const leadingText = streamedText.slice(0, streamedText.length - authoritativeText.length)
+              const leadingText = streamedText.slice(0, streamedText.length - overlapLength)
 
               if (leadingText) {
                 turnController.hydrateStreamingText(leadingText)

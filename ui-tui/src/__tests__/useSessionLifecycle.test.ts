@@ -100,6 +100,25 @@ describe('live session activation in-flight state', () => {
     expect(getTurnState().streaming).toBe('remaining answer')
   })
 
+  it('hydrates the authoritative interim when only its prefix reached the stream snapshot', () => {
+    hydrateLiveSessionInflight({
+      assistant: 'hello',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: true,
+          assistant_offset: 'hello'.length,
+          segment_id: 'stable-partial',
+          text: 'hello world'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['hello world'])
+    expect(turnController.bufRef).toBe('')
+    expect(getTurnState().streaming).toBe('')
+  })
+
   it('hydrates streamed text around commentary and ignores mismatched streamed boundaries', () => {
     hydrateLiveSessionInflight({
       assistant: '😀streamed prefixtail',

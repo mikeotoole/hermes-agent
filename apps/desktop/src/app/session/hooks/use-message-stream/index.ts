@@ -20,6 +20,7 @@ import {
   generatedImageEchoSources,
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
+import { streamedInterimPrefixLength } from '@/lib/interim-boundary'
 import { parseTodos } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
@@ -513,11 +514,11 @@ export function useMessageStream({
         if (streamId && hasStreamMessage && alreadyStreamed) {
           const streamedText = chatMessageText(streamMessage!).trim()
 
+          const overlapLength = streamedInterimPrefixLength(streamedText, authoritativeText)
+
           if (
             renderedPrefix !== null &&
-            (!renderedPrefix.endsWith(authoritativeText) ||
-              !renderedPrefix.endsWith(streamedText) ||
-              !streamedText.endsWith(authoritativeText))
+            (!renderedPrefix.endsWith(streamedText) || overlapLength === 0)
           ) {
             return state
           }
@@ -527,7 +528,7 @@ export function useMessageStream({
           // Compare/split the open suffix rather than requiring it to equal the
           // full cumulative prefix, or every boundary after the first is dropped.
           const leadingText =
-            renderedPrefix === null ? '' : streamedText.slice(0, streamedText.length - authoritativeText.length)
+            renderedPrefix === null ? '' : streamedText.slice(0, streamedText.length - overlapLength)
 
           if (leadingText) {
             nextMessages = nextMessages.map(message =>

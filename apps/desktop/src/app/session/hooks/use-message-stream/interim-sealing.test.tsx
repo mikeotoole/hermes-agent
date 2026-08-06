@@ -172,6 +172,17 @@ describe('useMessageStream interim text sealing', () => {
     )
   })
 
+  it('seals the authoritative interim when only its prefix streamed', async () => {
+    await mountStream()
+    await start()
+    await delta('hello')
+
+    await interim('hello world', 'stable-partial', true, 'hello')
+
+    expect(assistantMessages()).toEqual(['hello world'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-partial')).toBe(true)
+  })
+
   it('seals later streamed commentary when the gateway prefix includes earlier sealed segments', async () => {
     await mountStream()
     await start()
