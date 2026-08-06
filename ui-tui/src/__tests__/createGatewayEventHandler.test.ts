@@ -148,6 +148,29 @@ describe('createGatewayEventHandler', () => {
     expect(turnController.bufRef).toBe('')
   })
 
+  it('seals a whitespace-normalized interim after preserving ordinary streamed text', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({ payload: {}, type: 'message.start' } as any)
+    onEvent({ payload: { text: 'ordinary prefix hello   there' }, type: 'message.delta' } as any)
+    onEvent({
+      payload: {
+        already_streamed: true,
+        assistant_prefix: 'ordinary prefix hello   there',
+        segment_id: 'stable-normalized-partial',
+        text: 'hello there world'
+      },
+      type: 'message.interim'
+    } as any)
+
+    expect(getTurnState().streamSegments.map(message => message.text.trim())).toEqual([
+      'ordinary prefix',
+      'hello there world'
+    ])
+    expect(turnController.bufRef).toBe('')
+  })
+
   it('opens a billing confirm dialog routing Nous to /topup', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)

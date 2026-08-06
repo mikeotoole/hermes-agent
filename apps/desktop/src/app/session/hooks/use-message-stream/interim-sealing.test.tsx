@@ -183,6 +183,24 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().messages.some(message => message.id === 'assistant-interim-stable-partial')).toBe(true)
   })
 
+  it('seals a whitespace-normalized interim after preserving ordinary streamed text', async () => {
+    await mountStream()
+    await start()
+    await delta('ordinary prefix hello   there')
+
+    await interim(
+      'hello there world',
+      'stable-normalized-partial',
+      true,
+      'ordinary prefix hello   there'
+    )
+
+    expect(assistantMessages().map(text => text.trim())).toEqual(['ordinary prefix', 'hello there world'])
+    expect(
+      getState().messages.some(message => message.id === 'assistant-interim-stable-normalized-partial')
+    ).toBe(true)
+  })
+
   it('seals later streamed commentary when the gateway prefix includes earlier sealed segments', async () => {
     await mountStream()
     await start()

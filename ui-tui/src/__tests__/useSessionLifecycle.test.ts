@@ -119,6 +119,29 @@ describe('live session activation in-flight state', () => {
     expect(getTurnState().streaming).toBe('')
   })
 
+  it('hydrates a whitespace-normalized interim after preserving ordinary streamed text', () => {
+    const assistant = 'ordinary prefix hello   there'
+    hydrateLiveSessionInflight({
+      assistant,
+      streaming: true,
+      interim: [
+        {
+          already_streamed: true,
+          assistant_offset: assistant.length,
+          segment_id: 'stable-normalized-partial',
+          text: 'hello there world'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text.trim())).toEqual([
+      'ordinary prefix',
+      'hello there world'
+    ])
+    expect(turnController.bufRef).toBe('')
+    expect(getTurnState().streaming).toBe('')
+  })
+
   it('hydrates streamed text around commentary and ignores mismatched streamed boundaries', () => {
     hydrateLiveSessionInflight({
       assistant: '😀streamed prefixtail',

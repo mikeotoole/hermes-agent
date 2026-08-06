@@ -6,6 +6,8 @@ describe('streamedInterimPrefixLength', () => {
   it.each([
     ['hello', 'hello world', 5],
     ['before hello', 'hello world', 5],
+    ['hello   there', 'hello there world', 13],
+    ['before hello   there', 'hello there world', 13],
     ['ababab', 'ababx', 4],
     ['wrong', 'hello', 0],
     ['😀he', 'hello', 2]

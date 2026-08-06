@@ -1070,6 +1070,32 @@ describe('appendLiveSessionProjection', () => {
     })
   })
 
+  it('restores a whitespace-normalized interim after preserving ordinary streamed text', () => {
+    const assistant = 'ordinary prefix hello   there'
+
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant,
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-normalized-partial',
+            text: 'hello there world',
+            already_streamed: true,
+            assistant_offset: assistant.length
+          }
+        ]
+      }
+    })
+
+    expect(
+      restored
+        .map(message => message.parts.map(part => ('text' in part ? part.text : '')).join('').trim())
+        .filter(Boolean)
+    ).toEqual(['ordinary prefix', 'hello there world'])
+  })
+
   it('restores streamed text on both sides of non-streamed commentary', () => {
     const restored = appendLiveSessionProjection([], {
       session_id: 'runtime-1',
