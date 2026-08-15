@@ -176,6 +176,7 @@ async def test_session_list_projects_compression_tip_transcript_revision(
     assert surfaced["transcript_revision"] == "tip-revision"
 
 
+@pytest.mark.requires_wal
 @pytest.mark.asyncio
 async def test_message_endpoint_reads_revision_and_rows_from_one_sqlite_snapshot(
     adapter,
