@@ -1655,6 +1655,222 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["pagination"]["limit"] == 500
 
+    def test_get_session_messages_exposes_revision_for_the_full_active_transcript(self):
+        """The AgentCTRL dashboard route returns a page plus the opaque revision
+        of the full active canonical transcript read before pagination."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="dashboard-revision", source="cli")
+            for i in range(3):
+                db.append_message(
+                    session_id="dashboard-revision",
+                    role="user" if i % 2 == 0 else "assistant",
+                    content=f"msg {i}",
+                )
+            revision = db.get_session("dashboard-revision")["transcript_revision"]
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/sessions/dashboard-revision/messages",
+            params={"profile": "default", "limit": 1, "offset": 1},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["transcript_revision"] == revision
+        assert [message["content"] for message in payload["messages"]] == ["msg 1"]
+        assert payload["pagination"] == {"limit": 1, "offset": 1, "returned": 1}
+
+    def test_get_session_messages_resolves_the_active_compression_tip_revision(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="revision-root", source="cli")
+            db.append_message("revision-root", role="user", content="old generation")
+            db.end_session("revision-root", end_reason="compression")
+            db.create_session(
+                session_id="revision-tip",
+                source="cli",
+                parent_session_id="revision-root",
+            )
+            db.append_message("revision-tip", role="user", content="stale tip row")
+            db.archive_and_compact(
+                "revision-tip",
+                [{"role": "assistant", "content": "active canonical tip"}],
+            )
+            tip_revision = db.get_session("revision-tip")["transcript_revision"]
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/sessions/revision-root/messages",
+            params={"profile": "default"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == "revision-tip"
+        assert payload["transcript_revision"] == tip_revision
+        assert [message["content"] for message in payload["messages"]] == [
+            "active canonical tip"
+        ]
+
+    def test_get_sessions_compact_rows_preserve_the_projected_tip_revision(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="list-revision-root", source="cli")
+            db.append_message(
+                "list-revision-root", role="user", content="old generation"
+            )
+            db.end_session("list-revision-root", end_reason="compression")
+            db.create_session(
+                session_id="list-revision-tip",
+                source="cli",
+                parent_session_id="list-revision-root",
+                model_config={"api_key": "must-not-leak-from-compact-row"},
+            )
+            db.append_message(
+                "list-revision-tip", role="user", content="current generation"
+            )
+            db._conn.execute(
+                "UPDATE sessions SET transcript_revision = ? WHERE id = ?",
+                ("dashboard-tip-revision", "list-revision-tip"),
+            )
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/sessions",
+            params={"profile": "default", "source": "cli"},
+        )
+
+        assert response.status_code == 200
+        surfaced = next(
+            row
+            for row in response.json()["sessions"]
+            if row["id"] == "list-revision-tip"
+        )
+        assert surfaced["_lineage_root_id"] == "list-revision-root"
+        assert surfaced["transcript_revision"] == "dashboard-tip-revision"
+        assert "system_prompt" not in surfaced
+        assert "model_config" not in surfaced
+
+    def test_get_profiles_sessions_compact_rows_preserve_transcript_revision(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="profiles-list-revision",
+                source="cli",
+                model_config={"api_key": "must-not-leak-from-profile-compact-row"},
+            )
+            db.append_message(
+                "profiles-list-revision",
+                role="user",
+                content="profile list row",
+            )
+            revision = db.get_session("profiles-list-revision")["transcript_revision"]
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/profiles/sessions",
+            params={"profile": "all", "source": "cli"},
+        )
+
+        assert response.status_code == 200
+        surfaced = next(
+            row
+            for row in response.json()["sessions"]
+            if row["id"] == "profiles-list-revision"
+        )
+        assert surfaced["profile"] == "default"
+        assert surfaced["transcript_revision"] == revision
+        assert "system_prompt" not in surfaced
+        assert "model_config" not in surfaced
+
+    def test_get_session_messages_empty_session_keeps_revision_and_200_contract(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="empty-dashboard-revision", source="cli")
+            revision = db.get_session("empty-dashboard-revision")["transcript_revision"]
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/api/sessions/empty-dashboard-revision/messages",
+            params={"profile": "default"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": "empty-dashboard-revision",
+            "transcript_revision": revision,
+            "messages": [],
+            "pagination": {"limit": None, "offset": 0, "returned": 0},
+        }
+
+    def test_get_session_messages_missing_session_keeps_404_contract(self):
+        response = self.client.get(
+            "/api/sessions/does-not-exist/messages",
+            params={"profile": "default"},
+        )
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Session not found"}
+
+    def test_get_session_messages_uses_the_atomic_active_transcript_reader(
+        self,
+        monkeypatch,
+    ):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="atomic-dashboard-route", source="cli")
+            db.append_message(
+                "atomic-dashboard-route",
+                role="user",
+                content="one authoritative snapshot",
+            )
+        finally:
+            db.close()
+
+        original_get_active_transcript = SessionDB.get_active_transcript
+        atomic_reads = []
+
+        def tracked_atomic_read(instance, session_id):
+            atomic_reads.append(session_id)
+            return original_get_active_transcript(instance, session_id)
+
+        def reject_split_message_read(*args, **kwargs):
+            raise AssertionError(
+                "dashboard route must not split revision and message reads"
+            )
+
+        monkeypatch.setattr(SessionDB, "get_active_transcript", tracked_atomic_read)
+        monkeypatch.setattr(SessionDB, "get_messages", reject_split_message_read)
+
+        response = self.client.get(
+            "/api/sessions/atomic-dashboard-route/messages",
+            params={"profile": "default"},
+        )
+
+        assert response.status_code == 200
+        assert atomic_reads == ["atomic-dashboard-route"]
+        assert [message["content"] for message in response.json()["messages"]] == [
+            "one authoritative snapshot"
+        ]
+
 
 
 

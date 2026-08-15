@@ -267,6 +267,16 @@ opaque `transcript_revision` string in session resources and in
 revision and active message set atomically and never includes inactive or
 compaction-archived rows.
 
+The authenticated dashboard/Serve front door exposes the same contract. Its
+`GET /api/sessions/{session_id}/messages` envelope includes `session_id`,
+`transcript_revision`, `messages`, and `pagination`. `limit` and `offset` are
+applied only after Hermes atomically reads the revision and full active set, so
+the token always identifies the complete canonical transcript rather than the
+returned page. Compression-root requests resolve to the active continuation
+tip before that read. Compact rows from both `GET /api/sessions` and
+`GET /api/profiles/sessions` also retain the active tip's
+`transcript_revision`.
+
 Clients should treat the value as an equality token only. Ordinary message
 appends keep it stable. Canonical rewrites—including in-place compaction,
 `replace_messages` (full or active-only), effective rewind/restore operations,
@@ -277,9 +287,17 @@ authoritative and should replace the cached canonical transcript. Do not infer
 ordering or operation counts from the token and do not deduplicate transcript
 rows by content.
 
-The field is additive: older clients may ignore it. New clients should check
-the capability before depending on it so they remain compatible with older
-Hermes servers.
+The field is additive: older clients may ignore it. On the API Server surface,
+new clients should check the capability before depending on it so they remain
+compatible with older Hermes servers. Dashboard/Serve clients should likewise
+feature-detect the additive field when they may connect to older releases.
+
+#### Change log
+
+- **2026-08-15 — Dashboard/Serve route parity.** The authenticated dashboard
+  messages route now reads the revision and full active message set atomically,
+  applies pagination afterward, and returns `transcript_revision`. Compact
+  single-profile and all-profile session lists preserve the active tip's token.
 
 ## Per-request model selection
 
