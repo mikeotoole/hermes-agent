@@ -250,12 +250,36 @@ Returns a machine-readable description of the API server's stable surface for ex
     "run_submission": true,
     "run_status": true,
     "run_events_sse": true,
-    "run_stop": true
+    "run_stop": true,
+    "session_resources": true,
+    "session_transcript_revision": true
   }
 }
 ```
 
 Use this endpoint when integrating dashboards, browser UIs, or control planes so they can discover whether the running Hermes version supports runs, streaming, cancellation, and session continuity without depending on private Python internals.
+
+### Active transcript revisions
+
+When `features.session_transcript_revision` is `true`, Hermes includes an
+opaque `transcript_revision` string in session resources and in
+`GET /api/sessions/{session_id}/messages`. The messages endpoint reads the
+revision and active message set atomically and never includes inactive or
+compaction-archived rows.
+
+Clients should treat the value as an equality token only. Ordinary message
+appends keep it stable. Canonical rewrites—including in-place compaction,
+`replace_messages` (full or active-only), effective rewind/restore operations,
+and clearing a non-empty active transcript—replace it with a new opaque value.
+A client maintaining a local transcript may append a normal tail while the
+revision is unchanged; when it changes, the returned active message list is
+authoritative and should replace the cached canonical transcript. Do not infer
+ordering or operation counts from the token and do not deduplicate transcript
+rows by content.
+
+The field is additive: older clients may ignore it. New clients should check
+the capability before depending on it so they remain compatible with older
+Hermes servers.
 
 ## Per-request model selection
 

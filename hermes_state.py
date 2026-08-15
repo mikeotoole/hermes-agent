@@ -5904,6 +5904,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     "id", "ended_at", "end_reason", "message_count",
                     "tool_call_count", "title", "last_active", "preview",
                     "model", "system_prompt", "cwd", "git_branch", "git_repo_root",
+                    "transcript_revision",
                 ):
                     if key in tip_row:
                         merged[key] = tip_row[key]
@@ -6519,6 +6520,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return row[0] if row else None
 
+    @staticmethod
+    def _bump_transcript_revision(conn, session_id: str) -> None:
+        """Assign a fresh opaque identity to a rewritten active transcript."""
+        conn.execute(
+            "UPDATE sessions "
+            "SET transcript_revision = lower(hex(randomblob(16))) "
+            "WHERE id = ?",
+            (session_id,),
+        )
+
     def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Insert *messages* as fresh active rows for *session_id*.
 
@@ -6671,6 +6682,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
                 (total_messages, total_tool_calls, session_id),
             )
+            self._bump_transcript_revision(conn, session_id)
 
         self._execute_write(_do)
 
@@ -6736,6 +6748,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
                 (inserted, tool_calls_total, session_id),
             )
+            self._bump_transcript_revision(conn, session_id)
             return inserted
 
         return self._execute_write(_do)
@@ -6823,6 +6836,51 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 msg["display_metadata"] = self._decode_display_metadata(msg["display_metadata"])
             result.append(msg)
         return result
+
+    def get_active_transcript(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Atomically load the active transcript and its opaque revision.
+
+        The revision and rows come from one SQLite statement, so a concurrent
+        canonical rewrite cannot pair a new revision with an old message set
+        (or vice versa). Inactive/compacted rows are deliberately excluded.
+        """
+        with self._read_ctx() as conn:
+            assert conn is not None
+            rows = conn.execute(
+                "SELECT s.transcript_revision AS _transcript_revision, m.* "
+                "FROM sessions s "
+                "LEFT JOIN messages m "
+                "ON m.session_id = s.id AND m.active = 1 "
+                "WHERE s.id = ? ORDER BY m.id",
+                (session_id,),
+            ).fetchall()
+        if not rows:
+            return None
+
+        revision = rows[0]["_transcript_revision"]
+        messages = []
+        for row in rows:
+            if row["id"] is None:
+                continue
+            msg = dict(row)
+            msg.pop("_transcript_revision", None)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to deserialize tool_calls in get_active_transcript, "
+                        "falling back to []"
+                    )
+                    msg["tool_calls"] = []
+            if msg.get("display_metadata") is not None:
+                msg["display_metadata"] = self._decode_display_metadata(
+                    msg["display_metadata"]
+                )
+            messages.append(msg)
+        return {"transcript_revision": revision, "messages": messages}
 
     def get_messages_around(
         self,
@@ -7395,6 +7453,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     f"UPDATE messages SET active = 0 WHERE id IN ({placeholders})",
                     ids,
                 )
+                self._bump_transcript_revision(conn, session_id)
             conn.execute(
                 "UPDATE sessions SET rewind_count = COALESCE(rewind_count, 0) + 1 "
                 "WHERE id = ?",
@@ -7438,6 +7497,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     f"UPDATE messages SET active = 1 WHERE id IN ({placeholders})",
                     ids,
                 )
+                self._bump_transcript_revision(conn, session_id)
             return len(ids)
 
         return self._execute_write(_do)
@@ -7715,6 +7775,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
+            had_active = conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
+                (session_id,),
+            ).fetchone() is not None
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
@@ -7722,6 +7786,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
                 (session_id,),
             )
+            if had_active:
+                self._bump_transcript_revision(conn, session_id)
         self._execute_write(_do)
 
     @staticmethod
