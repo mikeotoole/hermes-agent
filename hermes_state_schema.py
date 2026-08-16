@@ -593,29 +593,6 @@ class SessionSchemaMixin:
         # column gets created here.
         self._reconcile_columns(cursor)
 
-        # Every session carries an opaque identity for its current canonical
-        # active transcript.  A constant DEFAULT keeps declarative ALTER TABLE
-        # reconciliation compatible with legacy SQLite databases. Install the
-        # trigger before backfilling: schema initialization is autocommit, so a
-        # rolling-upgrade writer can otherwise insert an empty token after the
-        # backfill and before trigger creation. The trigger covers every later
-        # insert; the idempotent backfill then covers every earlier row.
-        cursor.execute(
-            """CREATE TRIGGER IF NOT EXISTS sessions_transcript_revision_insert
-            AFTER INSERT ON sessions
-            WHEN NEW.transcript_revision IS NULL OR NEW.transcript_revision = ''
-            BEGIN
-                UPDATE sessions
-                SET transcript_revision = lower(hex(randomblob(16)))
-                WHERE id = NEW.id;
-            END"""
-        )
-        cursor.execute(
-            "UPDATE sessions "
-            "SET transcript_revision = lower(hex(randomblob(16))) "
-            "WHERE transcript_revision IS NULL OR transcript_revision = ''"
-        )
-
         # Rebuild gateway_routing if it still carries the pre-scope PRIMARY
         # KEY (session_key alone). ADD COLUMN cannot fix a PK, so this is
         # the one table-shape repair reconciliation can't express.

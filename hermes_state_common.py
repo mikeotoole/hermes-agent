@@ -243,7 +243,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     compression_ineffective_count INTEGER NOT NULL DEFAULT 0,
     profile_name TEXT,
     rewind_count INTEGER NOT NULL DEFAULT 0,
-    transcript_revision TEXT NOT NULL DEFAULT '',
     archived INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id),

@@ -609,31 +609,18 @@ async def get_session_messages(
             if not sid:
                 return None
             sid = db.resolve_resume_session_id(sid)
-            # Clamp limit to prevent abuse (max 500 per page). Read the active
-            # canonical set and its opaque revision in one SQLite snapshot,
-            # then slice the requested page so the revision always identifies
-            # the full set rather than only the returned window.
+            # Clamp limit to prevent abuse (max 500 per page)
             _limit = min(limit, 500) if limit is not None else None
-            transcript = db.get_active_transcript(sid)
-            if transcript is None:
-                return None
-            active_messages = transcript["messages"]
-            messages = (
-                active_messages[offset : offset + _limit]
-                if _limit is not None
-                else active_messages[offset:]
-            )
-            return sid, _limit, transcript["transcript_revision"], messages
+            return sid, _limit, db.get_messages(sid, limit=_limit, offset=offset)
         finally:
             db.close()
 
     result = await asyncio.to_thread(_read)
     if result is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    sid, _limit, transcript_revision, messages = result
+    sid, _limit, messages = result
     return {
         "session_id": sid,
-        "transcript_revision": transcript_revision,
         "messages": messages,
         "pagination": {
             "limit": _limit,

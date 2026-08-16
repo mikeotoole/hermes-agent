@@ -3003,7 +3003,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 "tool_progress_events": True,
                 "approval_events": True,
                 "session_resources": True,
-                "session_transcript_revision": True,
                 "model_options": True,
                 "session_chat": True,
                 "session_chat_streaming": True,
@@ -3158,7 +3157,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "output_tokens", "cache_read_tokens", "cache_write_tokens",
             "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
             "api_call_count", "parent_session_id", "last_active", "preview",
-            "transcript_revision", "_lineage_root_id",
+            "_lineage_root_id",
         )
         payload = {key: session.get(key) for key in safe_keys if key in session}
         # Avoid exposing full system prompts/model_config through the client API;
@@ -3410,21 +3409,11 @@ class APIServerAdapter(BasePlatformAdapter):
             return err
         db = await self._ensure_session_db_async()
         resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
-        transcript = await asyncio.to_thread(db.get_active_transcript, resolved_id)
-        if transcript is None:
-            return web.json_response(
-                _openai_error(
-                    f"Session not found: {resolved_id}", code="session_not_found"
-                ),
-                status=404,
-            )
+        messages = await asyncio.to_thread(db.get_messages, resolved_id)
         return web.json_response({
             "object": "list",
             "session_id": resolved_id,
-            "transcript_revision": transcript["transcript_revision"],
-            "data": [
-                self._message_response(m) for m in transcript["messages"]
-            ],
+            "data": [self._message_response(m) for m in messages],
         })
 
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":

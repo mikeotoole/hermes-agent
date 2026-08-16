@@ -250,54 +250,12 @@ Returns a machine-readable description of the API server's stable surface for ex
     "run_submission": true,
     "run_status": true,
     "run_events_sse": true,
-    "run_stop": true,
-    "session_resources": true,
-    "session_transcript_revision": true
+    "run_stop": true
   }
 }
 ```
 
 Use this endpoint when integrating dashboards, browser UIs, or control planes so they can discover whether the running Hermes version supports runs, streaming, cancellation, and session continuity without depending on private Python internals.
-
-### Active transcript revisions
-
-When `features.session_transcript_revision` is `true`, Hermes includes an
-opaque `transcript_revision` string in session resources and in
-`GET /api/sessions/{session_id}/messages`. The messages endpoint reads the
-revision and active message set atomically and never includes inactive or
-compaction-archived rows.
-
-The authenticated dashboard/Serve front door exposes the same contract. Its
-`GET /api/sessions/{session_id}/messages` envelope includes `session_id`,
-`transcript_revision`, `messages`, and `pagination`. `limit` and `offset` are
-applied only after Hermes atomically reads the revision and full active set, so
-the token always identifies the complete canonical transcript rather than the
-returned page. Compression-root requests resolve to the active continuation
-tip before that read. Compact rows from both `GET /api/sessions` and
-`GET /api/profiles/sessions` also retain the active tip's
-`transcript_revision`.
-
-Clients should treat the value as an equality token only. Ordinary message
-appends keep it stable. Canonical rewrites—including in-place compaction,
-`replace_messages` (full or active-only), effective rewind/restore operations,
-and clearing a non-empty active transcript—replace it with a new opaque value.
-A client maintaining a local transcript may append a normal tail while the
-revision is unchanged; when it changes, the returned active message list is
-authoritative and should replace the cached canonical transcript. Do not infer
-ordering or operation counts from the token and do not deduplicate transcript
-rows by content.
-
-The field is additive: older clients may ignore it. On the API Server surface,
-new clients should check the capability before depending on it so they remain
-compatible with older Hermes servers. Dashboard/Serve clients should likewise
-feature-detect the additive field when they may connect to older releases.
-
-#### Change log
-
-- **2026-08-15 — Dashboard/Serve route parity.** The authenticated dashboard
-  messages route now reads the revision and full active message set atomically,
-  applies pagination afterward, and returns `transcript_revision`. Compact
-  single-profile and all-profile session lists preserve the active tip's token.
 
 ## Per-request model selection
 
