@@ -622,15 +622,25 @@ export interface SessionResumeResponse {
   hydrating?: boolean
   inflight?: null | {
     assistant?: string
+    interim?: Array<{
+      already_streamed?: boolean
+      arrival_sequence?: number
+      assistant_offset?: number
+      segment_id?: string
+      text?: string
+    }>
     /** Mid-turn redirect corrections, oldest first. The turn's original prompt
      *  stays in `user`; these are the follow-ups typed while it ran. */
     corrections?: string[]
-    /** Parallel to `corrections`: the length of `assistant` already streamed
-     *  when each correction was accepted. Lets a resume rebuild arrival order —
+    /** Parallel to `corrections`: the UTF-16 code-unit length of `assistant`
+     *  already streamed when each correction was accepted. Lets a resume rebuild arrival order —
      *  the correction bubble lands after the output the user had already seen
      *  and before the output it redirected (#73793). Omitted by older
      *  gateways. */
     correction_offsets?: number[]
+    /** Parallel arrival sequence shared with interim `arrival_sequence` values.
+     *  Resolves correction/interim races at the same assistant offset. */
+    correction_sequences?: number[]
     /** Retained failed turn: the error the terminal frame carried (the frame
      *  itself may have been lost to a disconnect). */
     error?: string

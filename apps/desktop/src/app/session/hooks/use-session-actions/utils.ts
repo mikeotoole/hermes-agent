@@ -3,6 +3,7 @@ import { getSession } from '@/hermes'
 import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
+import { streamedInterimPrefixLength } from '@/lib/interim-boundary'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
@@ -696,6 +697,53 @@ export function preserveLocalPendingTurnMessages(
   return preserved.length ? [...withReplacements, ...preserved] : withReplacements
 }
 
+interface LiveInterimSegment {
+  alreadyStreamed: boolean
+  arrivalSequence: null | number
+  assistantOffset: null | number
+  segmentId: string
+  text: string
+}
+
+function liveInterimSegments(inflight: SessionResumeResponse['inflight']): LiveInterimSegment[] {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const segment = raw as Record<string, unknown>
+
+        const assistantOffset =
+          typeof segment.assistant_offset === 'number' &&
+          Number.isInteger(segment.assistant_offset) &&
+          segment.assistant_offset >= 0
+            ? segment.assistant_offset
+            : null
+
+        const arrivalSequence =
+          typeof segment.arrival_sequence === 'number' &&
+          Number.isInteger(segment.arrival_sequence) &&
+          segment.arrival_sequence > 0
+            ? segment.arrival_sequence
+            : null
+
+        const segmentId = typeof segment.segment_id === 'string' ? segment.segment_id.trim() : ''
+        const text = typeof segment.text === 'string' ? segment.text : ''
+
+        return segmentId && text
+          ? [{ alreadyStreamed: Boolean(segment.already_streamed), arrivalSequence, assistantOffset, segmentId, text }]
+          : []
+      })
+    : []
+}
+
+export function hasLiveInterimProjection(inflight: SessionResumeResponse['inflight']): boolean {
+  return liveInterimSegments(inflight).length > 0
+}
+
 /**
  * Append the backend-only tail of a live turn to a stored transcript.
  *
@@ -725,24 +773,41 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // streamed when they were typed, before the output they redirected.
   // `correction_offsets` (assistant-text length at each accepted correction)
   // carries that boundary; older gateways omit it.
-  const rawCorrections = projection.inflight?.corrections ?? []
-  const rawOffsets = projection.inflight?.correction_offsets
+  const rawCorrections = Array.isArray(projection.inflight?.corrections) ? projection.inflight.corrections : []
+  const rawOffsets = Array.isArray(projection.inflight?.correction_offsets)
+    ? projection.inflight.correction_offsets
+    : []
+  const rawSequences = Array.isArray(projection.inflight?.correction_sequences)
+    ? projection.inflight.correction_sequences
+    : []
 
   const inflightCorrectionEntries = rawCorrections
-    .map((correction, index) => ({ text: correction?.trim() ?? '', offset: rawOffsets?.[index] }))
+    .map((correction, index) => {
+      const rawSequence = rawSequences?.[index]
+
+      return {
+        text: correction?.trim() ?? '',
+        offset: rawOffsets?.[index],
+        sequence:
+          typeof rawSequence === 'number' && Number.isInteger(rawSequence) && rawSequence > 0 ? rawSequence : null
+      }
+    })
     .filter(entry => entry.text)
 
   const inflightCorrections = inflightCorrectionEntries.map(entry => entry.text)
 
   const correctionOffsetsUsable =
     inflightCorrectionEntries.length > 0 &&
-    inflightCorrectionEntries.every(entry => typeof entry.offset === 'number' && entry.offset >= 0)
+    inflightCorrectionEntries.every(
+      entry => typeof entry.offset === 'number' && Number.isInteger(entry.offset) && entry.offset >= 0
+    )
 
   // A retained failed turn (the gateway keeps error snapshots replayable when
   // the terminal frame may have been lost to a disconnect) — surface the
   // failure on the projected row instead of rendering the partial as healthy.
   const inflightError = projection.inflight?.error?.trim() ?? ''
   const queuedUser = projection.queued?.user?.trim() ?? ''
+  const inflightInterim = liveInterimSegments(projection.inflight)
 
   if (
     !inflightUser &&
@@ -750,7 +815,8 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     !inflightStreaming &&
     !inflightError &&
     !queuedUser &&
-    !inflightCorrections.length
+    !inflightCorrections.length &&
+    !inflightInterim.length
   ) {
     return messages
   }
@@ -841,7 +907,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   )
 
   const wantsAssistantRow = Boolean(
-    inflightAssistant || inflightStreaming || inflightError || (inflightUser && queuedUser)
+    inflightAssistant || inflightStreaming || inflightError || inflightInterim.length || (inflightUser && queuedUser)
   )
 
   const projectAssistantDump = wantsAssistantRow && !(turnAlreadyStructured && !inflightError)
@@ -858,6 +924,32 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     })
   }
 
+  const hasInterimSegment = (segment: LiveInterimSegment): boolean => {
+    const stableId = `assistant-interim-${segment.segmentId}`
+
+    return messages.some(message => message.id === stableId) || projected.some(message => message.id === stableId)
+  }
+
+  const pushInterimSegment = (segment: LiveInterimSegment): void => {
+    if (hasInterimSegment(segment)) {
+      return
+    }
+
+    const stableId = `assistant-interim-${segment.segmentId}`
+
+    projected.push({
+      id: stableId,
+      role: 'assistant',
+      parts: [assistantTextPart(segment.text)],
+      pending: false,
+      interim: true
+    })
+  }
+
+  if ((turnAlreadyStructured || inflightError) && inflightInterim.length) {
+    inflightInterim.forEach(pushInterimSegment)
+  }
+
   // Corrections typed while the turn ran are ordered by ARRIVAL: each lands
   // after the assistant output that had already streamed when it was typed and
   // before the output it redirected (#73793 — the old prompt → corrections →
@@ -866,7 +958,141 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // them (older gateway, or a structured/error tail that must stay whole) the
   // corrections follow the projected reply, matching the live transcript's
   // append-at-tail contract.
-  if (projectAssistantDump && correctionOffsetsUsable && !inflightError && inflightAssistant) {
+  if (projectAssistantDump && !inflightError && inflightInterim.length) {
+    type TimelineItem =
+      | { index: number; kind: 'correction'; offset: number; sequence: null | number; text: string }
+      | { index: number; kind: 'interim'; offset: number; segment: LiveInterimSegment; sequence: null | number }
+
+    const timeline: TimelineItem[] = [
+      ...inflightInterim.flatMap((segment, index) =>
+        segment.assistantOffset === null
+          ? []
+          : [
+              {
+                index,
+                kind: 'interim' as const,
+                offset: segment.assistantOffset,
+                segment,
+                sequence: segment.arrivalSequence
+              }
+            ]
+      ),
+      ...(correctionOffsetsUsable
+        ? inflightCorrectionEntries.map((entry, index) => ({
+            index,
+            kind: 'correction' as const,
+            offset: Math.min(Math.max(entry.offset as number, 0), inflightAssistant.length),
+            sequence: entry.sequence,
+            text: entry.text
+          }))
+        : [])
+    ].sort((a, b) => {
+      const byOffset = a.offset - b.offset
+
+      if (byOffset !== 0) {
+        return byOffset
+      }
+
+      if (a.sequence !== null && b.sequence !== null && a.sequence !== b.sequence) {
+        return a.sequence - b.sequence
+      }
+
+      return a.kind === b.kind ? a.index - b.index : a.kind === 'interim' ? -1 : 1
+    })
+
+    let cursor = 0
+    let streamChunkIndex = 0
+
+    const pushStreamChunk = (text: string): void => {
+      if (!text) {
+        return
+      }
+
+      projected.push({
+        id: `assistant-stream-${sessionId}-${streamChunkIndex++}`,
+        role: 'assistant',
+        parts: [assistantTextPart(text)],
+        pending: false
+      })
+    }
+
+    for (const item of timeline) {
+      if (item.kind === 'interim' && hasInterimSegment(item.segment)) {
+        continue
+      }
+
+      const offset = item.kind === 'correction' ? Math.max(item.offset, cursor) : item.offset
+
+      if (offset < cursor || offset > inflightAssistant.length) {
+        continue
+      }
+
+      if (item.kind === 'correction') {
+        pushStreamChunk(inflightAssistant.slice(cursor, offset))
+        cursor = offset
+        pushCorrection(item.text, item.index)
+
+        continue
+      }
+
+      const { segment } = item
+      const streamedChunk = inflightAssistant.slice(cursor, offset)
+      const overlapLength = streamedInterimPrefixLength(streamedChunk, segment.text)
+
+      if (overlapLength > 0) {
+        pushStreamChunk(streamedChunk.slice(0, streamedChunk.length - overlapLength))
+      } else {
+        if (segment.alreadyStreamed) {
+          continue
+        }
+
+        pushStreamChunk(streamedChunk)
+      }
+
+      cursor = offset
+      pushInterimSegment(segment)
+    }
+
+    for (const segment of inflightInterim) {
+      if (segment.assistantOffset !== null) {
+        continue
+      }
+
+      if (hasInterimSegment(segment)) {
+        continue
+      }
+
+      if (segment.alreadyStreamed) {
+        if (!inflightAssistant.slice(cursor).startsWith(segment.text)) {
+          continue
+        }
+
+        cursor += segment.text.length
+      } else {
+        pushStreamChunk(inflightAssistant.slice(cursor))
+        cursor = inflightAssistant.length
+      }
+
+      pushInterimSegment(segment)
+    }
+
+    const tail = inflightAssistant.slice(cursor)
+
+    if (tail || inflightStreaming || (inflightUser && queuedUser)) {
+      projected.push({
+        id: liveStreamId,
+        role: 'assistant',
+        parts: tail.trim() ? [assistantTextPart(tail)] : [],
+        pending: inflightStreaming
+      })
+    }
+
+    if (!correctionOffsetsUsable) {
+      for (const [index, correction] of inflightCorrections.entries()) {
+        pushCorrection(correction, index)
+      }
+    }
+  } else if (projectAssistantDump && correctionOffsetsUsable && !inflightError && inflightAssistant) {
     let cursor = 0
 
     for (const [index, entry] of inflightCorrectionEntries.entries()) {

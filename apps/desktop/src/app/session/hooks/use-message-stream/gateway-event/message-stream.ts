@@ -165,9 +165,19 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     if (sessionId) {
       flushQueuedDeltas(sessionId)
       const text = coerceGatewayText(payload?.text)
+      const segmentId = typeof payload?.segment_id === 'string' ? payload.segment_id.trim() : ''
+      const alreadyStreamed = payload?.already_streamed !== false
+      const assistantPrefix = typeof payload?.assistant_prefix === 'string' ? payload.assistant_prefix : undefined
 
       if (text) {
-        finalizeInterimAssistantMessage(sessionId, text, occurredAt)
+        finalizeInterimAssistantMessage(
+          sessionId,
+          text,
+          segmentId || undefined,
+          alreadyStreamed,
+          assistantPrefix,
+          occurredAt
+        )
       }
     }
 

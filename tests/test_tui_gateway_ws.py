@@ -153,6 +153,38 @@ def test_ws_starts_mcp_discovery_before_ready(monkeypatch):
     assert events == ["accept", "ready_after_0"]
 
 
+def test_ws_startup_advertises_interim_contracts():
+    frames = []
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            frames.append(server.json.loads(line))
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    server._sessions.clear()
+    server._live_transports.clear()
+    try:
+        asyncio.run(ws_mod.handle_ws(FakeWS()))
+    finally:
+        server._sessions.clear()
+        server._live_transports.clear()
+
+    payload = frames[0]["params"]["payload"]
+    assert payload["capabilities"] == [
+        "message.interim.v1",
+        "inflight.interim.v1",
+    ]
+    assert payload["change_events"] is True
+
+
 def test_ws_transport_serializes_concurrent_sends():
     active_sends = 0
     max_active_sends = 0

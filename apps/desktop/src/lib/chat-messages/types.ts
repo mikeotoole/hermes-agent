@@ -145,6 +145,11 @@ export type GatewayEventPayload = {
   // message.complete — signals the final text was already previewed via
   // interim_assistant_callback, so the UI can settle instead of duplicating.
   response_previewed?: boolean
+  // message.interim — stable reconnect identity and whether message.delta
+  // already populated the streaming bubble with this text.
+  already_streamed?: boolean
+  assistant_prefix?: string
+  segment_id?: string
   // message.complete with status "error" — `text` is streamed partial output
   // (keep it visible), not the error string.
   partial?: boolean

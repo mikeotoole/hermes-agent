@@ -10435,7 +10435,7 @@ def test_inflight_snapshot_carries_arrival_order_offsets():
     """
     session = {}
     server._start_inflight_turn(session, "remove the session counts")
-    server._append_inflight_delta(session, "Moving.")
+    server._append_inflight_delta(session, "😀Moving.")
     server._record_inflight_correction(session, "hurry up")
     server._append_inflight_delta(session, "Still.")
     server._record_inflight_correction(session, "and the worktree ones")
@@ -10445,7 +10445,10 @@ def test_inflight_snapshot_carries_arrival_order_offsets():
     assert snapshot is not None
 
     assert snapshot["corrections"] == ["hurry up", "and the worktree ones"]
-    assert snapshot["correction_offsets"] == [len("Moving."), len("Moving.Still.")]
+    assert snapshot["correction_offsets"] == [
+        server._utf16_code_units("😀Moving."),
+        server._utf16_code_units("😀Moving.Still."),
+    ]
 
 
 def test_inflight_snapshot_omits_offsets_when_not_fully_recorded():
@@ -10473,6 +10476,92 @@ def test_inflight_snapshot_omits_corrections_when_none_recorded():
     snapshot = server._inflight_snapshot(session)
     assert snapshot is not None
     assert "corrections" not in snapshot
+
+
+@pytest.mark.parametrize(
+    ("malformed_field", "turn_update", "expected_corrections"),
+    [
+        ("interim", {"interim": True}, None),
+        ("corrections", {"corrections": True}, None),
+        (
+            "correction_offsets",
+            {"corrections": ["redirect"], "correction_offsets": True},
+            ["redirect"],
+        ),
+        (
+            "correction_sequences",
+            {"corrections": ["redirect"], "correction_sequences": True},
+            ["redirect"],
+        ),
+    ],
+)
+def test_inflight_snapshot_ignores_malformed_parallel_containers(
+    malformed_field, turn_update, expected_corrections
+):
+    session = {}
+    server._start_inflight_turn(session, "prompt")
+    server._append_inflight_delta(session, "partial")
+    session["inflight_turn"].update(turn_update)
+
+    snapshot = server._inflight_snapshot(session)
+
+    assert snapshot is not None
+    assert snapshot["assistant"] == "partial"
+    assert snapshot.get("corrections") == expected_corrections
+    assert "interim" not in snapshot
+    assert malformed_field not in snapshot
+
+
+def test_interim_callback_replaces_a_malformed_retained_container(monkeypatch):
+    session = _session(running=True)
+    server._start_inflight_turn(session, "prompt")
+    session["inflight_turn"]["interim"] = True
+    server._sessions["sid-malformed-interim"] = session
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+    try:
+        server._on_interim_assistant("sid-malformed-interim", "checkpoint")
+    finally:
+        server._sessions.pop("sid-malformed-interim", None)
+
+    assert [boundary["text"] for boundary in session["inflight_turn"]["interim"]] == [
+        "checkpoint"
+    ]
+    assert emitted[0][0] == "message.interim"
+
+
+@pytest.mark.parametrize(
+    ("malformed_field", "malformed_value"),
+    [
+        ("corrections", True),
+        ("correction_offsets", True),
+        ("correction_sequences", True),
+    ],
+)
+def test_record_inflight_correction_survives_malformed_retained_containers(
+    malformed_field, malformed_value
+):
+    session = {}
+    server._start_inflight_turn(session, "prompt")
+    session["inflight_turn"].update(
+        {
+            "corrections": ["prior"],
+            "correction_offsets": [0],
+            "correction_sequences": [1],
+            malformed_field: malformed_value,
+        }
+    )
+
+    server._record_inflight_correction(session, "redirect")
+
+    turn = session["inflight_turn"]
+    expected_corrections = (
+        ["redirect"] if malformed_field == "corrections" else ["prior", "redirect"]
+    )
+    assert turn["corrections"] == expected_corrections
+    assert isinstance(turn["correction_offsets"], list)
+    assert isinstance(turn["correction_sequences"], list)
 
 
 def test_new_turn_does_not_inherit_prior_turn_corrections():
@@ -19830,3 +19919,61 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
     assert captured["row_update"] == (target, str(new_cwd))
     assert live["cwd"] == str(new_cwd)
     assert live.get("explicit_cwd") is True
+def test_run_prompt_submit_snapshots_interim_callback_for_reconnect(
+    monkeypatch, tmp_path
+):
+    _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_load_interim_assistant_messages", lambda: True)
+    emitted = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload)),
+    )
+    snapshots = []
+
+    class _InterimAgent(_RecordingAgent):
+        interim_assistant_callback = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            **_kwargs,
+        ):
+            self._turns.append(prompt)
+            self.interim_assistant_callback(
+                "checkpoint", already_streamed=False
+            )
+            snapshots.append(server._inflight_snapshot(session))
+            return {"final_response": "", "messages": []}
+
+    turns = []
+    agent = _InterimAgent(turns)
+    session = _session(agent=agent, running=True)
+    sid = "sid-interim-reconnect"
+    server._sessions[sid] = session
+
+    try:
+        server._run_prompt_submit("rid-interim", sid, session, "prompt")
+    finally:
+        server._sessions.pop(sid, None)
+
+    interim_events = [event for event in emitted if event[0] == "message.interim"]
+    assert len(interim_events) == 1
+    payload = interim_events[0][2]
+    assert payload["text"] == "checkpoint"
+    assert payload["already_streamed"] is False
+    assert isinstance(payload["segment_id"], str) and payload["segment_id"]
+    assert payload["assistant_prefix"] == ""
+    assert snapshots[0]["interim"] == [
+        {
+            "already_streamed": False,
+            "arrival_sequence": 1,
+            "assistant_offset": 0,
+            "segment_id": payload["segment_id"],
+            "text": "checkpoint",
+        }
+    ]
+    assert turns == ["prompt"]

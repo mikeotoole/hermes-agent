@@ -96,6 +96,7 @@ import {
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
   goneSessionVerdict,
+  hasLiveInterimProjection,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
@@ -970,6 +971,7 @@ export function useSessionActions({
                   messages: activatedMessages,
                   busy: running,
                   awaitingResponse: running,
+                  interimBoundaryPending: hasLiveInterimProjection(activated.inflight),
                   // Resumed onto an already-running turn — that IS backend
                   // proof the turn is live (no message.start will replay).
                   turnLive: state.turnLive || running,
@@ -1312,6 +1314,7 @@ export function useSessionActions({
             messages: messagesForView,
             busy: resumedRunning,
             awaitingResponse: resumedRunning && !recoveredInFlightTail,
+            interimBoundaryPending: hasLiveInterimProjection(resumed.inflight),
             // Backend reported this turn running at resume time — live proof.
             turnLive: state.turnLive || resumedRunning,
             needsInput: pendingApproval || pendingClarify || state.needsInput,

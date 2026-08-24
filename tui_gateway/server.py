@@ -6304,6 +6304,58 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _utf16_code_units(text: str) -> int:
+    """Return the string length used by JavaScript slice offsets."""
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _next_inflight_boundary_sequence(turn: dict) -> int:
+    """Allocate one arrival sequence shared by corrections and interim boundaries."""
+    current = turn.get("_boundary_sequence")
+    sequence = current if isinstance(current, int) and not isinstance(current, bool) and current >= 0 else 0
+    sequence += 1
+    turn["_boundary_sequence"] = sequence
+    return sequence
+
+
+def gateway_ready_payload(*, skin: dict | None = None) -> dict:
+    return {
+        "capabilities": ["message.interim.v1", "inflight.interim.v1"],
+        "change_events": True,
+        "skin": resolve_skin() if skin is None else skin,
+    }
+
+
+def _on_interim_assistant(
+    sid: str, text: Any, *, already_streamed: bool = False
+) -> None:
+    payload = {
+        "already_streamed": bool(already_streamed),
+        "segment_id": uuid.uuid4().hex,
+        "text": str(text),
+    }
+    session = _sessions.get(sid)
+    if session is not None:
+        lock = session.get("history_lock")
+        if lock is not None:
+            with lock:
+                turn = session.get("inflight_turn")
+                if isinstance(turn, dict):
+                    assistant_prefix = str(turn.get("assistant") or "")
+                    payload["assistant_prefix"] = assistant_prefix
+                    boundary = dict(payload)
+                    boundary.pop("assistant_prefix", None)
+                    boundary["assistant_offset"] = _utf16_code_units(assistant_prefix)
+                    boundary["arrival_sequence"] = _next_inflight_boundary_sequence(turn)
+                    interim = turn.get("interim")
+                    if not isinstance(interim, list):
+                        interim = []
+                        turn["interim"] = interim
+                    interim.append(boundary)
+                    turn["updated_at"] = time.time()
+    _emit("message.interim", sid, payload)
+
+
 def _agent_cbs(sid: str) -> dict:
     callbacks = {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -6404,10 +6456,8 @@ def _agent_cbs(sid: str) -> dict:
     # this, and the finally block clears it so a stale closure can't fire.
     if _load_interim_assistant_messages():
         callbacks["interim_assistant_callback"] = (
-            lambda text, *, already_streamed=False: _emit(
-                "message.interim",
-                sid,
-                {"text": str(text), "already_streamed": bool(already_streamed)},
+            lambda text, *, already_streamed=False: _on_interim_assistant(
+                sid, text, already_streamed=already_streamed
             )
         )
 
@@ -7843,16 +7893,23 @@ def _record_inflight_correction(session: dict, text: Any) -> None:
     if not isinstance(turn, dict):
         return
     turn = dict(turn)
-    corrections = list(turn.get("corrections") or [])
+    raw_corrections = turn.get("corrections")
+    corrections = list(raw_corrections) if isinstance(raw_corrections, list) else []
     corrections.append(correction)
     turn["corrections"] = corrections
-    # Arrival-order boundary: how much assistant text had already streamed
-    # when this correction was accepted. Resuming clients use it to place the
-    # correction bubble AFTER the output the user had already seen and BEFORE
+    # Arrival-order boundary: how many UTF-16 code units of assistant text had
+    # already streamed when this correction was accepted. Resuming clients use
+    # this boundary to place the correction bubble AFTER the output the user
+    # had already seen and BEFORE
     # the output it redirected (#73793) instead of above the whole reply.
-    offsets = list(turn.get("correction_offsets") or [])
-    offsets.append(len(str(turn.get("assistant") or "")))
+    raw_offsets = turn.get("correction_offsets")
+    offsets = list(raw_offsets) if isinstance(raw_offsets, list) else []
+    offsets.append(_utf16_code_units(str(turn.get("assistant") or "")))
     turn["correction_offsets"] = offsets
+    raw_sequences = turn.get("correction_sequences")
+    sequences = list(raw_sequences) if isinstance(raw_sequences, list) else []
+    sequences.append(_next_inflight_boundary_sequence(turn))
+    turn["correction_sequences"] = sequences
     turn["updated_at"] = time.time()
     session["inflight_turn"] = turn
 
@@ -8413,30 +8470,82 @@ def _inflight_snapshot(session: dict) -> dict | None:
     assistant = str(turn.get("assistant") or "")
     streaming = bool(turn.get("streaming"))
     error = str(turn.get("error") or "").strip()
-    if not user and not assistant and not streaming and not error:
+    raw_interim = turn.get("interim")
+    if not isinstance(raw_interim, list):
+        raw_interim = []
+    interim = []
+    for raw in raw_interim:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get("segment_id") or "").strip()
+        text = str(raw.get("text") or "")
+        if not segment_id or not text:
+            continue
+        boundary = {
+            "already_streamed": bool(raw.get("already_streamed")),
+            "segment_id": segment_id,
+            "text": text,
+        }
+        assistant_offset = raw.get("assistant_offset")
+        if (
+            isinstance(assistant_offset, int)
+            and not isinstance(assistant_offset, bool)
+            and assistant_offset >= 0
+        ):
+            boundary["assistant_offset"] = assistant_offset
+        arrival_sequence = raw.get("arrival_sequence")
+        if (
+            isinstance(arrival_sequence, int)
+            and not isinstance(arrival_sequence, bool)
+            and arrival_sequence > 0
+        ):
+            boundary["arrival_sequence"] = arrival_sequence
+        interim.append(boundary)
+    if not user and not assistant and not streaming and not error and not interim:
         return None
     snapshot = {
         "assistant": assistant,
         "streaming": streaming,
         "user": user,
     }
-    raw_corrections = turn.get("corrections") or []
-    raw_offsets = turn.get("correction_offsets") or []
+    raw_corrections = turn.get("corrections")
+    if not isinstance(raw_corrections, list):
+        raw_corrections = []
+    raw_offsets = turn.get("correction_offsets")
+    if not isinstance(raw_offsets, list):
+        raw_offsets = []
+    raw_sequences = turn.get("correction_sequences")
+    if not isinstance(raw_sequences, list):
+        raw_sequences = []
     correction_pairs = [
-        (str(c), raw_offsets[i] if i < len(raw_offsets) else None)
+        (
+            str(c),
+            raw_offsets[i] if i < len(raw_offsets) else None,
+            raw_sequences[i] if i < len(raw_sequences) else None,
+        )
         for i, c in enumerate(raw_corrections)
         if str(c).strip()
     ]
     if correction_pairs:
         # Mid-turn redirects. Carried alongside the original prompt (not over
         # it) so resume can rebuild every user bubble the turn produced.
-        snapshot["corrections"] = [c for c, _ in correction_pairs]
+        snapshot["corrections"] = [c for c, _, _ in correction_pairs]
         # Assistant-text lengths at each correction boundary (parallel list).
         # Only sent when every correction has one, so clients can trust the
         # pairing; older in-memory turns without offsets omit the field and
         # clients fall back to placing corrections after the assistant dump.
-        if all(isinstance(offset, int) and offset >= 0 for _, offset in correction_pairs):
-            snapshot["correction_offsets"] = [int(offset) for _, offset in correction_pairs]  # type: ignore[arg-type]
+        if all(
+            isinstance(offset, int) and not isinstance(offset, bool) and offset >= 0
+            for _, offset, _ in correction_pairs
+        ):
+            snapshot["correction_offsets"] = [int(offset) for _, offset, _ in correction_pairs]  # type: ignore[arg-type]
+        if all(
+            isinstance(sequence, int) and not isinstance(sequence, bool) and sequence > 0
+            for _, _, sequence in correction_pairs
+        ):
+            snapshot["correction_sequences"] = [int(sequence) for _, _, sequence in correction_pairs]  # type: ignore[arg-type]
+    if interim:
+        snapshot["interim"] = interim
     if error:
         # Retained failed turn (see _fail_inflight_turn): carry the error
         # semantics so a resuming client can rebuild the failed-turn bubble
@@ -10945,10 +11054,9 @@ def _run_prompt_submit(
             # Gated on display.interim_assistant_messages (default true).
             if _load_interim_assistant_messages():
                 def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-                    _emit("message.interim", sid, {
-                        "text": text,
-                        "already_streamed": already_streamed,
-                    })
+                    _on_interim_assistant(
+                        sid, text, already_streamed=already_streamed
+                    )
 
                 agent.interim_assistant_callback = _interim_assistant_cb
             else:

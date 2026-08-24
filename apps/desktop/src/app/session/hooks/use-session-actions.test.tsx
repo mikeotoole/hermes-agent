@@ -847,8 +847,15 @@ describe('resumeSession failure recovery', () => {
           turn_started_at: 1_700_000_000,
           inflight: {
             user: 'current prompt',
-            assistant: 'partial answer',
-            streaming: true
+            assistant: 'checkpointpartial answer',
+            streaming: true,
+            interim: [
+              {
+                segment_id: 'stable-1',
+                text: 'checkpoint',
+                already_streamed: true
+              }
+            ]
           },
           queued: { user: 'newest prompt' },
           info: {}
@@ -873,8 +880,10 @@ describe('resumeSession failure recovery', () => {
     const renderedMessages = JSON.stringify(resumedState?.messages)
     expect(renderedMessages).toContain('older question removed by compression')
     expect(renderedMessages).toContain('current prompt')
+    expect(renderedMessages).toContain('checkpoint')
     expect(renderedMessages).toContain('partial answer')
     expect(renderedMessages).toContain('newest prompt')
+    expect(resumedState?.interimBoundaryPending).toBe(true)
     expect(resumedState?.turnStartedAt).toBe(1_700_000_000_000)
   })
 
@@ -1941,6 +1950,8 @@ describe('resumeSession warm-cache mapping integrity', () => {
       current: new Map([['rt-A', cachedState]])
     }
 
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ messages: [], session_id: 'stored-A' } as never)
+
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'session.activate') {
         return {
@@ -1953,8 +1964,15 @@ describe('resumeSession warm-cache mapping integrity', () => {
           turn_started_at: turnStartedAtSeconds,
           inflight: {
             user: 'current prompt',
-            assistant: 'partial answer',
-            streaming: true
+            assistant: 'checkpointpartial answer',
+            streaming: true,
+            interim: [
+              {
+                segment_id: 'warm-stable-1',
+                text: 'checkpoint',
+                already_streamed: true
+              }
+            ]
           },
           info: {}
         } as never
@@ -1982,8 +2000,10 @@ describe('resumeSession warm-cache mapping integrity', () => {
     expect(resumedState).toMatchObject({
       awaitingResponse: true,
       busy: true,
+      interimBoundaryPending: true,
       turnStartedAt: turnStartedAtSeconds * 1000
     })
+    expect(JSON.stringify(resumedState?.messages)).toContain('checkpoint')
     expect(JSON.stringify(resumedState?.messages)).toContain('partial answer')
   })
 
