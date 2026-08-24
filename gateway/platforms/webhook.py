@@ -749,6 +749,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # Check event type filter
         event_type = (
             request.headers.get("X-GitHub-Event", "")
+            or request.headers.get("X-Gitea-Event", "")
             or request.headers.get("X-GitLab-Event", "")
             or payload.get("event_type", "")
             or payload.get("type", "")
