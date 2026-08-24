@@ -370,6 +370,30 @@ class TestEventFilter:
             )
             assert resp.status == 202
 
+    @pytest.mark.asyncio
+    async def test_event_filter_accepts_gitea_event_header(self):
+        """Gitea's event header participates in route event filtering."""
+        routes = {
+            "gitea": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request_review_approved"],
+                "prompt": "Review: {action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/gitea",
+                json={"action": "approved"},
+                headers={"X-Gitea-Event": "pull_request_review_approved"},
+            )
+
+        assert resp.status == 202
+        adapter.handle_message.assert_awaited_once()
+
 
 # ===================================================================
 # Payload filters
