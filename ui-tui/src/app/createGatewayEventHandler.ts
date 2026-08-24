@@ -15,6 +15,7 @@ import type {
 } from '../gatewayTypes.js'
 import { billingDialogCopy } from '../lib/billingDialog.js'
 import { relativeLuminance } from '../lib/color.js'
+import { streamedInterimPrefixLength } from '../lib/interimBoundary.js'
 import { isTodoDone } from '../lib/liveProgress.js'
 import { openExternalUrl } from '../lib/openExternalUrl.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
@@ -1413,9 +1414,40 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'message.interim': {
         const text = ev.payload?.text
+        const segmentId = typeof ev.payload?.segment_id === 'string' ? ev.payload.segment_id.trim() : ''
+        const alreadyStreamed = ev.payload?.already_streamed !== false
+
+        const assistantPrefix =
+          typeof ev.payload?.assistant_prefix === 'string' ? ev.payload.assistant_prefix.trimStart() : null
 
         if (typeof text === 'string' && text.trim()) {
-          turnController.recordInterimMessage(text)
+          let effectiveAlreadyStreamed = alreadyStreamed
+
+          if (assistantPrefix !== null) {
+            const authoritativeText = text.trimStart()
+            const streamedText = turnController.bufRef.trimStart()
+
+            if (!assistantPrefix.endsWith(streamedText)) {
+              return
+            }
+
+            const overlapLength = streamedInterimPrefixLength(streamedText, authoritativeText)
+
+            if (overlapLength > 0) {
+              effectiveAlreadyStreamed = true
+
+              const leadingText = streamedText.slice(0, streamedText.length - overlapLength)
+
+              if (leadingText) {
+                turnController.hydrateStreamingText(leadingText)
+                turnController.flushStreamingSegment()
+              }
+            } else if (alreadyStreamed) {
+              return
+            }
+          }
+
+          turnController.recordInterimMessage(text, segmentId || undefined, effectiveAlreadyStreamed)
         }
 
         return

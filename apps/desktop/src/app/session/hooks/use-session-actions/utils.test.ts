@@ -24,6 +24,7 @@ import {
   chatPartsEquivalent,
   dedupeInflightUserAgainstTranscript,
   goneSessionVerdict,
+  hasLiveInterimProjection,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
   preserveLocalPendingTurnMessages,
@@ -1263,6 +1264,352 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('ignores a malformed corrections container while preserving the partial assistant', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'partial answer',
+        corrections: true as never,
+        streaming: true
+      }
+    })
+
+    expect(restored.map(message => [message.role, chatMessageText(message)])).toEqual([
+      ['assistant', 'partial answer']
+    ])
+  })
+
+  it('rejects malformed interim records for boundary state', () => {
+    expect(
+      hasLiveInterimProjection({
+        interim: [{ segment_id: '', text: 'missing id' }, { segment_id: 'missing-text' }, null as never]
+      })
+    ).toBe(false)
+    expect(
+      hasLiveInterimProjection({
+        interim: [{ segment_id: 'stable-1', text: 'checkpoint' }]
+      })
+    ).toBe(true)
+  })
+
+  it('adds missing interim boundaries without flattening an existing structured live tail', () => {
+    const structured = streamingMsg('assistant-stream-runtime-1', 'structured partial')
+
+    const restored = appendLiveSessionProjection([msg('user-live', 'user', 'prompt'), structured], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'structured partial',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-structured',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 'structured partial'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.find(message => message.id === structured.id)).toBe(structured)
+    expect(restored.find(message => message.id === 'assistant-interim-stable-structured')).toMatchObject({
+      interim: true,
+      parts: [expect.objectContaining({ text: 'tool-call commentary' })]
+    })
+  })
+
+  it('adds missing interim boundaries beside an unsplit retained error row', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'partial failure text',
+        error: 'provider failed',
+        streaming: false,
+        interim: [
+          {
+            segment_id: 'stable-error',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 0
+          }
+        ]
+      }
+    })
+
+    expect(restored.find(message => message.id === 'assistant-interim-stable-error')).toMatchObject({
+      interim: true,
+      parts: [expect.objectContaining({ text: 'tool-call commentary' })]
+    })
+    expect(restored.find(message => message.error === 'provider failed')).toMatchObject({
+      parts: [expect.objectContaining({ text: 'partial failure text' })]
+    })
+  })
+
+  it('rejects mismatched streamed boundaries without reserving their stable id', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'tail',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'bad',
+            text: 'wrong',
+            already_streamed: true,
+            assistant_offset: 'tail'.length
+          },
+          {
+            segment_id: 'bad',
+            text: 'tail',
+            already_streamed: true,
+            assistant_offset: 'tail'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.id)).toContain('assistant-interim-bad')
+    expect(restored.map(message => chatMessageText(message)).filter(Boolean)).toEqual(['tail'])
+  })
+
+  it('rejects a repeated stable id before it consumes later assistant text', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'abcXYZ',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-repeat',
+            text: 'abc',
+            already_streamed: true,
+            assistant_offset: 3
+          },
+          {
+            segment_id: 'stable-repeat',
+            text: 'XYZ',
+            already_streamed: true,
+            assistant_offset: 6
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => chatMessageText(message)).filter(Boolean)).toEqual(['abc', 'XYZ'])
+  })
+
+  it('preserves streamed-before-commentary ordering for old snapshots without prefixes', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'streamed prefix',
+        streaming: false,
+        interim: [
+          {
+            segment_id: 'legacy-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      'streamed prefix',
+      'tool-call commentary'
+    ])
+  })
+
+  it('restores stable interim boundaries without duplicating streamed text', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        user: 'current prompt',
+        assistant: 'streamed checkpointremaining answer',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-1',
+            text: 'streamed checkpoint',
+            already_streamed: true,
+            assistant_offset: 'streamed checkpoint'.length
+          },
+          {
+            segment_id: 'stable-2',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 'streamed checkpoint'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.id)).toEqual([
+      'user-inflight-runtime-1',
+      'assistant-interim-stable-1',
+      'assistant-interim-stable-2',
+      'assistant-stream-runtime-1'
+    ])
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      'current prompt',
+      'streamed checkpoint',
+      'tool-call commentary',
+      'remaining answer'
+    ])
+    expect(restored[1]).toMatchObject({ pending: false })
+    expect(restored[2]).toMatchObject({ pending: false })
+    expect(restored[3]).toMatchObject({ pending: true })
+  })
+
+  it('restores streamed text on both sides of non-streamed commentary', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: '😀streamed prefixtail',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: '😀streamed prefix'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => message.parts.map(part => ('text' in part ? part.text : '')).join(''))).toEqual([
+      '😀streamed prefix',
+      'tool-call commentary',
+      'tail'
+    ])
+  })
+
+  it('restores the authoritative interim when only its prefix reached the stream snapshot', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'hello',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-partial',
+            text: 'hello world',
+            already_streamed: true,
+            assistant_offset: 'hello'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.find(message => message.id === 'assistant-interim-stable-partial')).toMatchObject({
+      interim: true,
+      parts: [expect.objectContaining({ text: 'hello world' })]
+    })
+  })
+
+  it('replaces a truncated snapshot prefix when the producer marks the full interim non-streamed', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'hello',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-partial-false',
+            text: 'hello world',
+            already_streamed: false,
+            assistant_offset: 'hello'.length
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => chatMessageText(message)).filter(Boolean)).toEqual(['hello world'])
+  })
+
+  it('restores a whitespace-normalized interim after preserving ordinary streamed text', () => {
+    const assistant = 'ordinary prefix hello   there'
+
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant,
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-normalized-partial',
+            text: 'hello there world',
+            already_streamed: true,
+            assistant_offset: assistant.length
+          }
+        ]
+      }
+    })
+
+    expect(
+      restored
+        .map(message => message.parts.map(part => ('text' in part ? part.text : '')).join('').trim())
+        .filter(Boolean)
+    ).toEqual(['ordinary prefix', 'hello there world'])
+  })
+
+  it('orders an interim boundary before a correction accepted at the same assistant offset', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'beforeafter',
+        streaming: true,
+        corrections: ['redirect'],
+        correction_offsets: [6],
+        interim: [
+          {
+            segment_id: 'stable-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 6
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => [message.role, chatMessageText(message)])).toEqual([
+      ['assistant', 'before'],
+      ['assistant', 'tool-call commentary'],
+      ['user', 'redirect'],
+      ['assistant', 'after']
+    ])
+  })
+
+  it('preserves correction-first arrival at the same assistant offset when sequence metadata is available', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'beforeafter',
+        streaming: true,
+        corrections: ['redirect'],
+        correction_offsets: [6],
+        correction_sequences: [1],
+        interim: [
+          {
+            segment_id: 'stable-commentary',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 6,
+            arrival_sequence: 2
+          }
+        ]
+      }
+    })
+
+    expect(restored.map(message => [message.role, chatMessageText(message)])).toEqual([
+      ['assistant', 'before'],
+      ['user', 'redirect'],
+      ['assistant', 'tool-call commentary'],
+      ['assistant', 'after']
+    ])
+  })
+
   // Corrections typed while a turn ran are their own user bubbles on the same
   // turn, ordered by ARRIVAL. Without boundary offsets (older gateway) the
   // whole dump precedes them — never the old prompt → corrections → reply

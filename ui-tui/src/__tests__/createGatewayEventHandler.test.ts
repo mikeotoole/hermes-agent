@@ -2071,6 +2071,179 @@ describe('createGatewayEventHandler', () => {
   })
 
   describe('message.interim', () => {
+    it('preserves successive interim boundaries when assistant_prefix is cumulative', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'first segment' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'first segment',
+          segment_id: 'segment-1',
+          text: 'first segment'
+        },
+        type: 'message.interim'
+      } as any)
+      onEvent({ payload: { text: 'second segment' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'first segmentsecond segment',
+          segment_id: 'segment-2',
+          text: 'second segment'
+        },
+        type: 'message.interim'
+      } as any)
+      onEvent({ payload: { text: 'final response' }, type: 'message.complete' } as any)
+
+      expect(appended.filter(message => message.role === 'assistant').map(message => message.text)).toEqual([
+        'first segment',
+        'second segment',
+        'final response'
+      ])
+    })
+
+    it('keeps ordinary streamed text before already-streamed commentary', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'ordinary prefixstreamed commentary' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'ordinary prefixstreamed commentary',
+          segment_id: 'stable-streamed-commentary',
+          text: 'streamed commentary'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'ordinary prefix',
+        'streamed commentary'
+      ])
+    })
+
+    it('dedupes repeated live interim events by stable segment id', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['checkpoint'])
+    })
+
+    it('keeps non-streamed interim commentary distinct from streamed text', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'streamed prefix' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: { already_streamed: false, segment_id: 'stable-commentary', text: 'tool-call commentary' },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+        'streamed prefix',
+        'tool-call commentary'
+      ])
+    })
+
+    it('seals the authoritative interim when only its prefix streamed', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'hello' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'hello',
+          segment_id: 'stable-partial',
+          text: 'hello world'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['hello world'])
+      expect(turnController.bufRef).toBe('')
+    })
+
+    it('replaces a truncated streamed prefix when the producer marks the full interim non-streamed', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'hello' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: false,
+          assistant_prefix: 'hello',
+          segment_id: 'stable-partial-false',
+          text: 'hello world'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['hello world'])
+      expect(turnController.bufRef).toBe('')
+    })
+
+    it('rejects an interim whose assistant prefix does not match the live stream', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'hello' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'different',
+          segment_id: 'stable-mismatch',
+          text: 'hello world'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments).toEqual([])
+      expect(turnController.bufRef).toBe('hello')
+    })
+
+    it('seals a whitespace-normalized interim after preserving ordinary streamed text', () => {
+      const appended: Msg[] = []
+      const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+      onEvent({ payload: {}, type: 'message.start' } as any)
+      onEvent({ payload: { text: 'ordinary prefix hello   there' }, type: 'message.delta' } as any)
+      onEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'ordinary prefix hello   there',
+          segment_id: 'stable-normalized-partial',
+          text: 'hello there world'
+        },
+        type: 'message.interim'
+      } as any)
+
+      expect(getTurnState().streamSegments.map(message => message.text.trim())).toEqual([
+        'ordinary prefix',
+        'hello there world'
+      ])
+      expect(turnController.bufRef).toBe('')
+    })
+
     it('finalizes an interim segment without settling the turn', () => {
       const appended: Msg[] = []
       const onEvent = createGatewayEventHandler(buildCtx(appended))

@@ -22,6 +22,7 @@ import {
   generatedImageEchoSources,
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
+import { streamedInterimPrefixLength } from '@/lib/interim-boundary'
 import { parseTodos } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
@@ -491,16 +492,31 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string, occurredAt = Date.now() / 1000) => {
+    (
+      sessionId: string,
+      text: string,
+      segmentId?: string,
+      alreadyStreamed = true,
+      assistantPrefix?: string,
+      occurredAt = Date.now() / 1000
+    ) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
         }
 
         const authoritativeText = renderMediaTags(text).trim()
+        const stableMessageId = segmentId ? `assistant-interim-${segmentId}` : null
+        const renderedPrefix = assistantPrefix === undefined ? null : renderMediaTags(assistantPrefix).trim()
 
         if (!authoritativeText) {
           return state
+        }
+
+        if (stableMessageId && state.messages.some(message => message.id === stableMessageId)) {
+          return state.interimBoundaryPending
+            ? state
+            : { ...state, interimBoundaryPending: true, sawAssistantPayload: true }
         }
 
         const streamId = state.streamId
@@ -512,27 +528,82 @@ export function useMessageStream({
         }
 
         let nextMessages = state.messages
+        const streamMessage = streamId ? nextMessages.find(message => message.id === streamId) : undefined
+        const hasStreamMessage = Boolean(streamMessage)
 
-        if (streamId && nextMessages.some(m => m.id === streamId)) {
-          // Seal the streaming bubble in place, marked interim so it renders
-          // without an action footer (see ChatMessage.interim).
-          nextMessages = nextMessages.map(m =>
-            m.id === streamId
-              ? {
-                  ...m,
-                  parts: completeOpenTimelineParts(replaceTextPart(m.parts), occurredAt),
-                  completedAt: occurredAt,
-                  pending: false,
-                  interim: true
-                }
-              : m
-          )
+        if (streamId && hasStreamMessage && (alreadyStreamed || renderedPrefix !== null)) {
+          const streamedText = chatMessageText(streamMessage!).trim()
+          const overlapLength = streamedInterimPrefixLength(streamedText, authoritativeText)
+
+          if (renderedPrefix !== null && !renderedPrefix.endsWith(streamedText)) {
+            return state
+          }
+
+          if (alreadyStreamed && overlapLength === 0) {
+            return state
+          }
+
+          const leadingText = renderedPrefix === null ? '' : streamedText.slice(0, streamedText.length - overlapLength)
+
+          if (leadingText) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId
+                ? {
+                    ...message,
+                    parts: completeOpenTimelineParts(
+                      mergeFinalAssistantText(message.parts, leadingText, occurredAt),
+                      occurredAt
+                    ),
+                    completedAt: occurredAt,
+                    pending: false
+                  }
+                : message
+            )
+            nextMessages = [
+              ...nextMessages,
+              {
+                id: stableMessageId ?? nextStreamMessageId('assistant-interim'),
+                role: 'assistant' as const,
+                parts: [{ ...assistantTextPart(authoritativeText, occurredAt), completedAt: occurredAt }],
+                timestamp: occurredAt,
+                completedAt: occurredAt,
+                pending: false,
+                interim: true,
+                branchGroupId: state.pendingBranchGroup ?? undefined
+              }
+            ]
+          } else {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId
+                ? {
+                    ...message,
+                    ...(stableMessageId ? { id: stableMessageId } : {}),
+                    parts: completeOpenTimelineParts(replaceTextPart(message.parts), occurredAt),
+                    completedAt: occurredAt,
+                    pending: false,
+                    interim: true
+                  }
+                : message
+            )
+          }
         } else {
-          // No streaming bubble — create a standalone interim message
+          if (streamId && hasStreamMessage) {
+            nextMessages = nextMessages.map(message =>
+              message.id === streamId
+                ? {
+                    ...message,
+                    parts: completeOpenTimelineParts(message.parts, occurredAt),
+                    completedAt: occurredAt,
+                    pending: false
+                  }
+                : message
+            )
+          }
+
           nextMessages = [
             ...nextMessages,
             {
-              id: nextStreamMessageId('assistant-interim'),
+              id: stableMessageId ?? nextStreamMessageId('assistant-interim'),
               role: 'assistant' as const,
               parts: [{ ...assistantTextPart(authoritativeText, occurredAt), completedAt: occurredAt }],
               timestamp: occurredAt,

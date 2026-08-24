@@ -3,8 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { chatMessageText } from '@/lib/chat-messages'
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
+
+import { appendLiveSessionProjection } from '../use-session-actions/utils'
 
 import { type MessageStreamHarness, renderMessageStream } from './test-harness'
 
@@ -23,8 +26,19 @@ const start = () => act(() => stream.handleEvent({ payload: {}, session_id: SID,
 const delta = (text: string) =>
   act(() => stream.handleEvent({ payload: { text }, session_id: SID, type: 'message.delta' }))
 
-const interim = (text: string) =>
-  act(() => stream.handleEvent({ payload: { text, already_streamed: true }, session_id: SID, type: 'message.interim' }))
+const interim = (text: string, segmentId?: string, alreadyStreamed = true, assistantPrefix?: string) =>
+  act(() =>
+    stream.handleEvent({
+      payload: {
+        text,
+        already_streamed: alreadyStreamed,
+        ...(segmentId ? { segment_id: segmentId } : {}),
+        ...(assistantPrefix === undefined ? {} : { assistant_prefix: assistantPrefix })
+      },
+      session_id: SID,
+      type: 'message.interim'
+    })
+  )
 
 const complete = (text: string) =>
   act(() => stream.handleEvent({ payload: { text }, session_id: SID, type: 'message.complete' }))
@@ -63,6 +77,127 @@ describe('useMessageStream interim text sealing', () => {
     cleanup()
     clearSessionTodos(SID)
     vi.restoreAllMocks()
+  })
+
+  it('dedupes repeated interim events by stable segment id', async () => {
+    mountStream()
+    await start()
+
+    const event = {
+      payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
+      session_id: SID,
+      type: 'message.interim'
+    } as RpcEvent
+
+    await act(() => stream.handleEvent(event))
+    await act(() => stream.handleEvent(event))
+
+    expect(assistantMessages()).toEqual(['checkpoint'])
+  })
+
+  it('dedupes a live replay against an interim restored during reconnect', async () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: SID,
+      inflight: {
+        assistant: '',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-restored',
+            text: 'checkpoint',
+            already_streamed: false,
+            assistant_offset: 0
+          }
+        ]
+      }
+    })
+
+    const states = new Map([[SID, { ...createClientSessionState(), messages: restored }]])
+    stream = renderMessageStream(SID, { states })
+
+    await interim('checkpoint', 'stable-restored', false)
+
+    expect(assistantMessages()).toEqual(['checkpoint'])
+  })
+
+  it('keeps non-streamed interim commentary distinct from streamed text', async () => {
+    mountStream()
+    await start()
+    await delta('streamed prefix')
+
+    await act(() =>
+      stream.handleEvent({
+        payload: { already_streamed: false, segment_id: 'stable-commentary', text: 'tool-call commentary' },
+        session_id: SID,
+        type: 'message.interim'
+      } as RpcEvent)
+    )
+
+    expect(assistantMessages()).toEqual(['streamed prefix', 'tool-call commentary'])
+  })
+
+  it('seals a whitespace-normalized interim after preserving ordinary streamed text', async () => {
+    mountStream()
+    await start()
+    await delta('ordinary prefix hello   there')
+
+    await act(() =>
+      stream.handleEvent({
+        payload: {
+          already_streamed: true,
+          assistant_prefix: 'ordinary prefix hello   there',
+          segment_id: 'stable-normalized-partial',
+          text: 'hello there world'
+        },
+        session_id: SID,
+        type: 'message.interim'
+      } as RpcEvent)
+    )
+
+    expect(assistantMessages().map(text => text.trim())).toEqual(['ordinary prefix', 'hello there world'])
+  })
+
+  it('replaces a truncated streamed prefix when the producer marks the full interim non-streamed', async () => {
+    mountStream()
+    await start()
+    await delta('hello')
+    await interim('hello world', 'stable-partial-false', false, 'hello')
+
+    expect(assistantMessages()).toEqual(['hello world'])
+  })
+
+  it('rejects an interim whose assistant prefix does not match the live stream', async () => {
+    mountStream()
+    await start()
+    await delta('hello')
+    await interim('hello world', 'stable-mismatch', true, 'different')
+
+    expect(assistantMessages()).toEqual(['hello'])
+  })
+
+  it('keeps ordinary streamed text before already-streamed commentary', async () => {
+    mountStream()
+    await start()
+    await delta('ordinary prefixstreamed commentary')
+    await interim('streamed commentary', 'stable-streamed-commentary', true, 'ordinary prefixstreamed commentary')
+
+    expect(assistantMessages()).toEqual(['ordinary prefix', 'streamed commentary'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-streamed-commentary')).toBe(
+      true
+    )
+  })
+
+  it('seals later streamed commentary when the gateway prefix includes earlier sealed segments', async () => {
+    mountStream()
+    await start()
+    await delta('first segment')
+    await interim('first segment', 'stable-first', true, 'first segment')
+    await delta('second segment')
+    await interim('second segment', 'stable-second', true, 'first segmentsecond segment')
+    await complete('final answer')
+
+    expect(assistantMessages()).toEqual(['first segment', 'second segment', 'final answer'])
+    expect(getState().messages.some(message => message.id === 'assistant-interim-stable-second')).toBe(true)
   })
 
   it('preserves interim text that the final response does not include', async () => {

@@ -17,6 +17,7 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import { streamedInterimPrefixLength } from '../lib/interimBoundary.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
@@ -57,18 +58,312 @@ export const writeActiveSessionFile = (sessionId: null | string, file = process.
 
 export const liveSessionInflightMessages = (inflight?: null | SessionInflightTurn): Msg[] => {
   const user = String(inflight?.user ?? '').trim()
+  const error = String(inflight?.error ?? '').trim()
+
+  if (error) {
+    return failedSessionInflightMessages(inflight ?? {}, user, error)
+  }
 
   return user ? [{ role: 'user', text: user }] : []
 }
 
+interface LiveInterimBoundary {
+  alreadyStreamed: boolean
+  arrivalSequence: null | number
+  assistantOffset: null | number
+  segmentId: string
+  text: string
+}
+
+export const liveSessionInterimBoundaries = (inflight?: null | SessionInflightTurn): LiveInterimBoundary[] => {
+  const rawInterim: unknown = inflight?.interim
+
+  return Array.isArray(rawInterim)
+    ? rawInterim.flatMap(raw => {
+        if (!raw || typeof raw !== 'object') {
+          return []
+        }
+
+        const boundary = raw as Record<string, unknown>
+
+        const assistantOffset =
+          typeof boundary.assistant_offset === 'number' &&
+          Number.isInteger(boundary.assistant_offset) &&
+          boundary.assistant_offset >= 0
+            ? boundary.assistant_offset
+            : null
+
+        const segmentId = typeof boundary.segment_id === 'string' ? boundary.segment_id.trim() : ''
+        const text = typeof boundary.text === 'string' ? boundary.text : ''
+        const arrivalSequence =
+          typeof boundary.arrival_sequence === 'number' &&
+          Number.isInteger(boundary.arrival_sequence) &&
+          boundary.arrival_sequence > 0
+            ? boundary.arrival_sequence
+            : null
+
+        return segmentId && text
+          ? [{ alreadyStreamed: Boolean(boundary.already_streamed), arrivalSequence, assistantOffset, segmentId, text }]
+          : []
+      })
+    : []
+}
+
+interface LiveCorrectionBoundary {
+  assistantOffset: null | number
+  index: number
+  sequence: null | number
+  text: string
+}
+
+const liveSessionCorrectionBoundaries = (inflight?: null | SessionInflightTurn): LiveCorrectionBoundary[] => {
+  if (!Array.isArray(inflight?.corrections)) {
+    return []
+  }
+
+  return inflight.corrections.flatMap((value, index) => {
+    const text = String(value ?? '').trim()
+    const rawOffset = inflight.correction_offsets?.[index]
+    const rawSequence = inflight.correction_sequences?.[index]
+    const assistantOffset =
+      typeof rawOffset === 'number' && Number.isInteger(rawOffset) && rawOffset >= 0 ? rawOffset : null
+    const sequence =
+      typeof rawSequence === 'number' && Number.isInteger(rawSequence) && rawSequence > 0 ? rawSequence : null
+
+    return text ? [{ assistantOffset, index, sequence, text }] : []
+  })
+}
+
+const failedSessionInflightMessages = (inflight: SessionInflightTurn, user: string, error: string): Msg[] => {
+  const assistant = String(inflight.assistant ?? '')
+  const interim = liveSessionInterimBoundaries(inflight)
+  const corrections = liveSessionCorrectionBoundaries(inflight)
+  const correctionOffsetsUsable =
+    corrections.length > 0 && corrections.every(boundary => boundary.assistantOffset !== null)
+  const messages: Msg[] = user ? [{ role: 'user', text: user }] : []
+  const seenInterimIds = new Set<string>()
+  let assistantCursor = 0
+
+  const pushAssistant = (text: string) => {
+    if (text) {
+      messages.push({ role: 'assistant', text })
+    }
+  }
+
+  const timeline = [
+    ...interim.flatMap((boundary, index) =>
+      boundary.assistantOffset === null
+        ? []
+        : [{ boundary, index, kind: 'interim' as const, offset: boundary.assistantOffset }]
+    ),
+    ...(correctionOffsetsUsable
+      ? corrections.map(boundary => ({
+          boundary,
+          index: boundary.index,
+          kind: 'correction' as const,
+          offset: boundary.assistantOffset!
+        }))
+      : [])
+  ].sort((a, b) => {
+    if (a.offset !== b.offset) {
+      return a.offset - b.offset
+    }
+
+    const aSequence = a.kind === 'interim' ? a.boundary.arrivalSequence : a.boundary.sequence
+    const bSequence = b.kind === 'interim' ? b.boundary.arrivalSequence : b.boundary.sequence
+
+    if (aSequence !== null && bSequence !== null && aSequence !== bSequence) {
+      return aSequence - bSequence
+    }
+
+    return a.kind === b.kind ? a.index - b.index : a.kind === 'interim' ? -1 : 1
+  })
+
+  for (const item of timeline) {
+    if (item.kind === 'correction') {
+      const offset = Math.min(Math.max(item.offset, assistantCursor), assistant.length)
+
+      pushAssistant(assistant.slice(assistantCursor, offset))
+      assistantCursor = offset
+      messages.push({ role: 'user', text: item.boundary.text })
+
+      continue
+    }
+
+    const boundary = item.boundary
+
+    if (seenInterimIds.has(boundary.segmentId) || item.offset < assistantCursor || item.offset > assistant.length) {
+      continue
+    }
+
+    const streamedChunk = assistant.slice(assistantCursor, item.offset)
+    const overlapLength = streamedInterimPrefixLength(streamedChunk, boundary.text)
+
+    if (overlapLength > 0) {
+      pushAssistant(streamedChunk.slice(0, streamedChunk.length - overlapLength))
+    } else {
+      if (boundary.alreadyStreamed) {
+        continue
+      }
+
+      pushAssistant(streamedChunk)
+    }
+
+    assistantCursor = item.offset
+    seenInterimIds.add(boundary.segmentId)
+    messages.push({ role: 'assistant', text: boundary.text })
+  }
+
+  for (const boundary of interim) {
+    if (boundary.assistantOffset !== null || seenInterimIds.has(boundary.segmentId)) {
+      continue
+    }
+
+    if (boundary.alreadyStreamed) {
+      if (!assistant.slice(assistantCursor).startsWith(boundary.text)) {
+        continue
+      }
+
+      assistantCursor += boundary.text.length
+    } else {
+      pushAssistant(assistant.slice(assistantCursor))
+      assistantCursor = assistant.length
+    }
+
+    seenInterimIds.add(boundary.segmentId)
+    messages.push({ role: 'assistant', text: boundary.text })
+  }
+
+  pushAssistant(assistant.slice(assistantCursor))
+
+  if (!correctionOffsetsUsable) {
+    corrections.forEach(boundary => messages.push({ role: 'user', text: boundary.text }))
+  }
+
+  messages.push({ role: 'system', text: `error: ${error}` })
+
+  return messages
+}
+
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
   const assistant = String(inflight?.assistant ?? '')
+  const interim = liveSessionInterimBoundaries(inflight)
+  const corrections = liveSessionCorrectionBoundaries(inflight)
+  let assistantCursor = 0
 
-  if (!assistant && !inflight?.streaming) {
+  if (String(inflight?.error ?? '').trim()) {
+    turnController.recordError()
+
     return
   }
 
-  turnController.hydrateStreamingText(assistant)
+  if (!assistant && !inflight?.streaming && !interim.length && !corrections.length) {
+    return
+  }
+
+  const correctionOffsetsUsable =
+    corrections.length > 0 && corrections.every(boundary => boundary.assistantOffset !== null)
+  const timeline = [
+    ...interim.flatMap((boundary, index) =>
+      boundary.assistantOffset === null
+        ? []
+        : [{ boundary, index, kind: 'interim' as const, offset: boundary.assistantOffset }]
+    ),
+    ...(correctionOffsetsUsable
+      ? corrections.map(boundary => ({
+          boundary,
+          index: boundary.index,
+          kind: 'correction' as const,
+          offset: boundary.assistantOffset!
+        }))
+      : [])
+  ].sort((a, b) => {
+    if (a.offset !== b.offset) {
+      return a.offset - b.offset
+    }
+
+    const aSequence = a.kind === 'interim' ? a.boundary.arrivalSequence : a.boundary.sequence
+    const bSequence = b.kind === 'interim' ? b.boundary.arrivalSequence : b.boundary.sequence
+
+    if (aSequence !== null && bSequence !== null && aSequence !== bSequence) {
+      return aSequence - bSequence
+    }
+
+    return a.kind === b.kind ? a.index - b.index : a.kind === 'interim' ? -1 : 1
+  })
+
+  for (const item of timeline) {
+    if (item.kind === 'correction') {
+      const offset = Math.min(Math.max(item.offset, assistantCursor), assistant.length)
+
+      turnController.hydrateStreamingText(assistant.slice(assistantCursor, offset))
+      turnController.flushStreamingSegment()
+      assistantCursor = offset
+      turnController.recordCorrectionMessage(item.boundary.text)
+
+      continue
+    }
+
+    const boundary = item.boundary
+
+    if (turnController.hasInterimSegment(boundary.segmentId)) {
+      continue
+    }
+
+    const assistantOffset = boundary.assistantOffset
+    let effectiveAlreadyStreamed = boundary.alreadyStreamed
+
+    if (assistantOffset! < assistantCursor || assistantOffset! > assistant.length) {
+      continue
+    }
+
+    const streamedChunk = assistant.slice(assistantCursor, assistantOffset!)
+    const overlapLength = streamedInterimPrefixLength(streamedChunk, boundary.text)
+
+    if (overlapLength > 0) {
+      effectiveAlreadyStreamed = true
+      turnController.hydrateStreamingText(streamedChunk.slice(0, streamedChunk.length - overlapLength))
+      turnController.flushStreamingSegment()
+    } else {
+      if (boundary.alreadyStreamed) {
+        continue
+      }
+
+      turnController.hydrateStreamingText(streamedChunk)
+      turnController.flushStreamingSegment()
+    }
+
+    assistantCursor = assistantOffset!
+    turnController.recordInterimMessage(boundary.text, boundary.segmentId, effectiveAlreadyStreamed)
+  }
+
+  for (const boundary of interim) {
+    if (boundary.assistantOffset !== null || turnController.hasInterimSegment(boundary.segmentId)) {
+      continue
+    }
+
+    if (boundary.alreadyStreamed) {
+      if (!assistant.slice(assistantCursor).startsWith(boundary.text)) {
+        continue
+      }
+
+      assistantCursor += boundary.text.length
+    } else {
+      turnController.hydrateStreamingText(assistant.slice(assistantCursor))
+      turnController.flushStreamingSegment()
+      assistantCursor = assistant.length
+    }
+
+    turnController.recordInterimMessage(boundary.text, boundary.segmentId, boundary.alreadyStreamed)
+  }
+
+  turnController.hydrateStreamingText(assistant.slice(assistantCursor))
+
+  if (!correctionOffsetsUsable) {
+    for (const boundary of corrections) {
+      turnController.recordCorrectionMessage(boundary.text)
+    }
+  }
 }
 
 export const signalFreshSessionBoundary = (

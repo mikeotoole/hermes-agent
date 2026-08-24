@@ -39,6 +39,7 @@ def _run_main(monkeypatch, events, *, prewarm=None):
     monkeypatch.setattr(entry, "_install_sidecar_publisher", lambda: None)
     monkeypatch.setattr(entry, "ensure_mcp_discovery_started", lambda: None)
     monkeypatch.setattr(entry, "resolve_skin", lambda: "default")
+    monkeypatch.setattr(entry.server, "resolve_skin", lambda: "default")
     monkeypatch.setattr(entry.server, "_ensure_skin_watcher", lambda: None)
     monkeypatch.setattr(entry, "_log_exit", lambda reason: None)
     # Genuine EOF, no fd-0 forensics in the test process.
@@ -47,6 +48,8 @@ def _run_main(monkeypatch, events, *, prewarm=None):
     def _write_json(payload):
         params = payload.get("params") or {}
         events.append(("write", params.get("type") or payload.get("method")))
+        if params.get("type") == "gateway.ready":
+            events.append(("capabilities", tuple((params.get("payload") or {}).get("capabilities") or ())))
         return True
 
     monkeypatch.setattr(entry, "write_json", _write_json)
@@ -84,6 +87,10 @@ def test_main_prewarms_picker_cache_after_gateway_ready(monkeypatch):
         "prewarm must fire AFTER the gateway.ready write (idle window, "
         f"banner already shown); order was {events!r}"
     )
+
+    capabilities = dict(event for event in events if event[0] == "capabilities")["capabilities"]
+    assert "message.interim.v1" in capabilities
+    assert "inflight.interim.v1" in capabilities
 
 
 def test_main_survives_prewarm_failure(monkeypatch):
