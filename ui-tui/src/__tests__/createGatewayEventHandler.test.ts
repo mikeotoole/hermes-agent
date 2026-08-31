@@ -5,6 +5,7 @@ import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/ov
 import { turnController } from '../app/turnController.js'
 import { getTurnState, resetTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
+import { ZERO } from '../domain/usage.js'
 import { estimateTokensRough } from '../lib/text.js'
 import type { Msg } from '../types.js'
 
@@ -92,83 +93,6 @@ describe('createGatewayEventHandler', () => {
     // doesn't visibly jump across the final answer at end-of-turn.
     expect(appended.indexOf(trail!)).toBeLessThan(appended.indexOf(finalText!))
     expect(getTurnState().todos).toEqual([])
-  })
-
-  it('preserves successive interim boundaries when assistant_prefix is cumulative', () => {
-    const appended: Msg[] = []
-    const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-    onEvent({ payload: {}, type: 'message.start' } as any)
-    onEvent({ payload: { text: 'first segment' }, type: 'message.delta' } as any)
-    onEvent({
-      payload: {
-        already_streamed: true,
-        assistant_prefix: 'first segment',
-        segment_id: 'segment-1',
-        text: 'first segment'
-      },
-      type: 'message.interim'
-    } as any)
-    onEvent({ payload: { text: 'second segment' }, type: 'message.delta' } as any)
-    onEvent({
-      payload: {
-        already_streamed: true,
-        assistant_prefix: 'first segmentsecond segment',
-        segment_id: 'segment-2',
-        text: 'second segment'
-      },
-      type: 'message.interim'
-    } as any)
-    onEvent({ payload: { text: 'final response' }, type: 'message.complete' } as any)
-
-    expect(appended.filter(message => message.role === 'assistant').map(message => message.text)).toEqual([
-      'first segment',
-      'second segment',
-      'final response'
-    ])
-  })
-
-  it('seals the authoritative interim when only its prefix streamed', () => {
-    const appended: Msg[] = []
-    const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-    onEvent({ payload: {}, type: 'message.start' } as any)
-    onEvent({ payload: { text: 'hello' }, type: 'message.delta' } as any)
-    onEvent({
-      payload: {
-        already_streamed: true,
-        assistant_prefix: 'hello',
-        segment_id: 'stable-partial',
-        text: 'hello world'
-      },
-      type: 'message.interim'
-    } as any)
-
-    expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['hello world'])
-    expect(turnController.bufRef).toBe('')
-  })
-
-  it('seals a whitespace-normalized interim after preserving ordinary streamed text', () => {
-    const appended: Msg[] = []
-    const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-    onEvent({ payload: {}, type: 'message.start' } as any)
-    onEvent({ payload: { text: 'ordinary prefix hello   there' }, type: 'message.delta' } as any)
-    onEvent({
-      payload: {
-        already_streamed: true,
-        assistant_prefix: 'ordinary prefix hello   there',
-        segment_id: 'stable-normalized-partial',
-        text: 'hello there world'
-      },
-      type: 'message.interim'
-    } as any)
-
-    expect(getTurnState().streamSegments.map(message => message.text.trim())).toEqual([
-      'ordinary prefix',
-      'hello there world'
-    ])
-    expect(turnController.bufRef).toBe('')
   })
 
   it('opens a billing confirm dialog routing Nous to /topup', () => {
@@ -970,6 +894,39 @@ describe('createGatewayEventHandler', () => {
     expect(ctx.voice.setVoiceEnabled).not.toHaveBeenCalled()
   })
 
+  it('leaves voice transcripts editable when voice.submit_mode is draft', async () => {
+    const ctx = buildCtx([])
+    let composerInput = 'existing draft'
+
+    ctx.gateway.rpc = vi.fn(async (method: string) =>
+      method === 'config.get' ? { config: { voice: { submit_mode: 'draft' } } } : null
+    )
+    ctx.composer.setInput = vi.fn((next: string | ((current: string) => string)) => {
+      composerInput = typeof next === 'function' ? next(composerInput) : next
+    })
+    const onEvent = createGatewayEventHandler(ctx)
+
+    onEvent({ payload: { text: '  edit this first  ' }, type: 'voice.transcript' } as any)
+
+    await vi.waitFor(() => expect(composerInput).toBe('existing draft edit this first'))
+    expect(ctx.submission.submitRef.current).not.toHaveBeenCalled()
+    expect(ctx.gateway.rpc).toHaveBeenCalledWith('config.get', { key: 'full' })
+  })
+
+  it('falls back to direct submit for an invalid voice.submit_mode', async () => {
+    const ctx = buildCtx([])
+
+    ctx.gateway.rpc = vi.fn(async (method: string) =>
+      method === 'config.get' ? { config: { voice: { submit_mode: 'refine' } } } : null
+    )
+    const onEvent = createGatewayEventHandler(ctx)
+
+    onEvent({ payload: { text: 'send safely' }, type: 'voice.transcript' } as any)
+
+    await vi.waitFor(() => expect(ctx.submission.submitRef.current).toHaveBeenCalledWith('send safely'))
+    expect(ctx.composer.setInput).toHaveBeenCalledWith('')
+  })
+
   it('opens a fresh session before starting voice after wake detection', async () => {
     const ctx = buildCtx([])
     ctx.session.newSession = vi.fn(async () => patchUiState({ sid: 'wake-session' }))
@@ -1640,6 +1597,96 @@ describe('createGatewayEventHandler', () => {
     expect(getOverlayState().sudo).toBeNull()
   })
 
+  // ── Batch (multi-question) clarify ─────────────────────────────────
+
+  it('parses a batch clarify.request into a questions overlay', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: {
+        questions: [
+          { choices: ['a', 'b'], qid: 'q0', question: 'One?' },
+          { choices: null, qid: 'q1', question: 'Two?' }
+        ],
+        request_id: 'req-batch'
+      },
+      type: 'clarify.request'
+    } as any)
+
+    const clarify = getOverlayState().clarify
+    expect(clarify?.requestId).toBe('req-batch')
+    expect(clarify?.questions).toHaveLength(2)
+    expect(clarify?.questions?.[0]?.qid).toBe('q0')
+    expect(clarify?.questions?.[1]?.choices).toBeNull()
+    expect(clarify?.answers).toEqual({})
+  })
+
+  it('seeds locked answers from a reconnect-replay batch clarify.request', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: {
+        answers: { q0: 'a' },
+        questions: [
+          { choices: ['a', 'b'], qid: 'q0', question: 'One?' },
+          { choices: null, qid: 'q1', question: 'Two?' }
+        ],
+        request_id: 'req-replay'
+      },
+      type: 'clarify.request'
+    } as any)
+
+    expect(getOverlayState().clarify?.answers).toEqual({ q0: 'a' })
+  })
+
+  it('drops malformed batch entries and falls back to single-question shape when none survive', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: {
+        choices: ['x', 'y'],
+        question: 'Fallback?',
+        questions: [
+          { qid: '', question: 'no qid' },
+          { qid: 'q1', question: '   ' }
+        ],
+        request_id: 'req-bad'
+      },
+      type: 'clarify.request'
+    } as any)
+
+    const clarify = getOverlayState().clarify
+    expect(clarify?.questions).toBeUndefined()
+    expect(clarify?.question).toBe('Fallback?')
+    expect(clarify?.choices).toEqual(['x', 'y'])
+  })
+
+  it('persists an abandoned batch clarify with its locked partials on tool.complete', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    patchOverlayState({
+      clarify: {
+        answers: { q0: 'alpha' },
+        choices: null,
+        question: '',
+        questions: [
+          { choices: ['alpha', 'beta'], qid: 'q0', question: 'One?' },
+          { choices: null, qid: 'q1', question: 'Two?' }
+        ],
+        requestId: 'req-batch-timeout'
+      }
+    })
+
+    onEvent({ payload: { name: 'clarify', tool_id: 'clar-b' }, type: 'tool.complete' } as any)
+
+    const record = appended.find(msg => msg.role === 'system' && msg.text.startsWith('ask (2 questions)'))
+    expect(record).toBeDefined()
+    expect(record?.text).toContain('✓ One? → alpha')
+    expect(record?.text).toContain('· Two? (no answer)')
+    expect(getOverlayState().clarify).toBeNull()
+  })
+
   // ── Credits notice (Strategy B) ──────────────────────────────────────
   describe('credits notice', () => {
     it('shows a notice immediately when idle (no turn in flight)', () => {
@@ -1982,6 +2029,47 @@ describe('createGatewayEventHandler', () => {
     })
   })
 
+  describe('session.usage', () => {
+    it('merges a live usage tick into uiState (payload.usage shape, see tui_gateway _start_usage_ticker)', () => {
+      patchUiState({ sid: 'sess-1' })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      onEvent({
+        payload: { usage: { calls: 3, context_percent: 42, input: 1200, output: 80, total: 1280 } },
+        session_id: 'sess-1',
+        type: 'session.usage'
+      } as any)
+
+      expect(getUiState().usage).toMatchObject({ context_percent: 42, input: 1200, total: 1280 })
+    })
+
+    it('keeps existing usage fields when the tick only carries a subset', () => {
+      patchUiState({ sid: 'sess-1', usage: { calls: 2, input: 500, output: 40, total: 540 } })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      onEvent({
+        payload: { usage: { context_percent: 55 } },
+        session_id: 'sess-1',
+        type: 'session.usage'
+      } as any)
+
+      expect(getUiState().usage).toMatchObject({ context_percent: 55, input: 500, total: 540 })
+    })
+
+    it('drops a tick for a non-focused session', () => {
+      patchUiState({ sid: 'focused', usage: ZERO })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      onEvent({
+        payload: { usage: { input: 9999, total: 9999 } },
+        session_id: 'background',
+        type: 'session.usage'
+      } as any)
+
+      expect(getUiState().usage).toEqual(ZERO)
+    })
+  })
+
   describe('message.interim', () => {
     it('finalizes an interim segment without settling the turn', () => {
       const appended: Msg[] = []
@@ -1994,62 +2082,6 @@ describe('createGatewayEventHandler', () => {
       // Turn is still active — busy stays true, no completion messages appended
       expect(getUiState().busy).toBe(true)
       expect(appended).toHaveLength(0)
-    })
-
-    it('dedupes repeated live interim events by stable segment id', () => {
-      const appended: Msg[] = []
-      const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-      onEvent({ payload: {}, type: 'message.start' } as any)
-      onEvent({
-        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
-        type: 'message.interim'
-      } as any)
-      onEvent({
-        payload: { already_streamed: false, segment_id: 'stable-1', text: 'checkpoint' },
-        type: 'message.interim'
-      } as any)
-
-      expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['checkpoint'])
-    })
-
-    it('keeps non-streamed interim commentary distinct from streamed text', () => {
-      const appended: Msg[] = []
-      const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-      onEvent({ payload: {}, type: 'message.start' } as any)
-      onEvent({ payload: { text: 'streamed prefix' }, type: 'message.delta' } as any)
-      onEvent({
-        payload: { already_streamed: false, segment_id: 'stable-commentary', text: 'tool-call commentary' },
-        type: 'message.interim'
-      } as any)
-
-      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
-        'streamed prefix',
-        'tool-call commentary'
-      ])
-    })
-
-    it('keeps ordinary streamed text before already-streamed commentary', () => {
-      const appended: Msg[] = []
-      const onEvent = createGatewayEventHandler(buildCtx(appended))
-
-      onEvent({ payload: {}, type: 'message.start' } as any)
-      onEvent({ payload: { text: 'ordinary prefixstreamed commentary' }, type: 'message.delta' } as any)
-      onEvent({
-        payload: {
-          already_streamed: true,
-          assistant_prefix: 'ordinary prefixstreamed commentary',
-          segment_id: 'stable-streamed-commentary',
-          text: 'streamed commentary'
-        },
-        type: 'message.interim'
-      } as any)
-
-      expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
-        'ordinary prefix',
-        'streamed commentary'
-      ])
     })
 
     it('keeps identical interim and terminal replies as separate messages without response_previewed', () => {

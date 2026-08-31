@@ -17,15 +17,17 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
-import { streamedInterimPrefixLength } from '../lib/interimBoundary.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
 import type { ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
+import { scheduleResumeScrollToBottom } from './sessionResumeView.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
+
+export { refreshSessionView, scheduleResumeScrollToBottom } from './sessionResumeView.js'
 
 const usageFrom = (info: null | SessionInfo): Usage => (info?.usage ? { ...ZERO, ...info.usage } : ZERO)
 
@@ -59,90 +61,14 @@ export const liveSessionInflightMessages = (inflight?: null | SessionInflightTur
   return user ? [{ role: 'user', text: user }] : []
 }
 
-interface LiveInterimBoundary {
-  alreadyStreamed: boolean
-  assistantOffset: null | number
-  segmentId: string
-  text: string
-}
-
-export const liveSessionInterimBoundaries = (inflight?: null | SessionInflightTurn): LiveInterimBoundary[] => {
-  const rawInterim: unknown = inflight?.interim
-
-  return Array.isArray(rawInterim)
-    ? rawInterim.flatMap(raw => {
-        if (!raw || typeof raw !== 'object') {
-          return []
-        }
-
-        const boundary = raw as Record<string, unknown>
-
-        const assistantOffset =
-          typeof boundary.assistant_offset === 'number' &&
-          Number.isInteger(boundary.assistant_offset) &&
-          boundary.assistant_offset >= 0
-            ? boundary.assistant_offset
-            : null
-
-        const segmentId = typeof boundary.segment_id === 'string' ? boundary.segment_id.trim() : ''
-        const text = typeof boundary.text === 'string' ? boundary.text : ''
-
-        return segmentId && text
-          ? [{ alreadyStreamed: Boolean(boundary.already_streamed), assistantOffset, segmentId, text }]
-          : []
-      })
-    : []
-}
-
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
   const assistant = String(inflight?.assistant ?? '')
-  const interim = liveSessionInterimBoundaries(inflight)
-  let assistantCursor = 0
 
-  if (!assistant && !inflight?.streaming && !interim.length) {
+  if (!assistant && !inflight?.streaming) {
     return
   }
 
-  for (const boundary of interim) {
-    const assistantOffset = boundary.assistantOffset
-
-    if (assistantOffset !== null) {
-      if (assistantOffset < assistantCursor || assistantOffset > assistant.length) {
-        continue
-      }
-
-      if (boundary.alreadyStreamed) {
-        const streamedChunk = assistant.slice(assistantCursor, assistantOffset)
-        const overlapLength = streamedInterimPrefixLength(streamedChunk, boundary.text)
-
-        if (overlapLength === 0) {
-          continue
-        }
-
-        turnController.hydrateStreamingText(streamedChunk.slice(0, streamedChunk.length - overlapLength))
-        turnController.flushStreamingSegment()
-      } else {
-        turnController.hydrateStreamingText(assistant.slice(assistantCursor, assistantOffset))
-        turnController.flushStreamingSegment()
-      }
-
-      assistantCursor = assistantOffset
-    } else if (boundary.alreadyStreamed) {
-      if (!assistant.slice(assistantCursor).startsWith(boundary.text)) {
-        continue
-      }
-
-      assistantCursor += boundary.text.length
-    } else {
-      turnController.hydrateStreamingText(assistant.slice(assistantCursor))
-      turnController.flushStreamingSegment()
-      assistantCursor = assistant.length
-    }
-
-    turnController.recordInterimMessage(boundary.text, boundary.segmentId, boundary.alreadyStreamed)
-  }
-
-  turnController.hydrateStreamingText(assistant.slice(assistantCursor))
+  turnController.hydrateStreamingText(assistant)
 }
 
 export const signalFreshSessionBoundary = (
@@ -157,35 +83,6 @@ export const signalFreshSessionBoundary = (
   onFreshSessionStarted(nextSid)
 
   return true
-}
-
-export const scheduleResumeScrollToBottom = (
-  scrollRef: RefObject<null | ScrollBoxHandle>,
-  delays: readonly number[] = [0, 80, 240]
-) => {
-  const startedAt = Date.now()
-
-  const timers = delays.map((delay, index) =>
-    setTimeout(() => {
-      const scroll = scrollRef.current
-
-      if (!scroll) {
-        return
-      }
-
-      const manuallyScrolledAfterResume = scroll.getLastManualScrollAt() > startedAt
-
-      if (!manuallyScrolledAfterResume && (index === 0 || scroll.isSticky())) {
-        scroll.scrollToBottom()
-      }
-    }, delay)
-  )
-
-  return () => {
-    for (const timer of timers) {
-      clearTimeout(timer)
-    }
-  }
 }
 
 const trimTail = (items: Msg[]) => {
@@ -353,6 +250,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
             const nextTitle = (result.title ?? requestedTitle).trim()
             const suffix = result.pending ? ' (queued while session initializes)' : ''
+            patchUiState({ sessionTitle: nextTitle })
             sys(`session title set: ${nextTitle}${suffix}`)
           })
           .catch((err: unknown) => {

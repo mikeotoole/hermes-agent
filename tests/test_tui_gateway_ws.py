@@ -4,40 +4,9 @@ import json
 import threading
 import time
 
+from hermes_cli import mcp_startup
 from tui_gateway import server
 from tui_gateway import ws as ws_mod
-
-
-def test_ws_startup_advertises_interim_contracts():
-    frames = []
-
-    class FakeWS:
-        async def accept(self):
-            pass
-
-        async def send_text(self, line):
-            frames.append(server.json.loads(line))
-
-        async def receive_text(self):
-            raise ws_mod._WebSocketDisconnect()
-
-        async def close(self):
-            pass
-
-    server._sessions.clear()
-    server._live_transports.clear()
-    try:
-        asyncio.run(ws_mod.handle_ws(FakeWS()))
-    finally:
-        server._sessions.clear()
-        server._live_transports.clear()
-
-    payload = frames[0]["params"]["payload"]
-    assert payload["capabilities"] == [
-        "message.interim.v1",
-        "inflight.interim.v1",
-    ]
-    assert payload["change_events"] is True
 
 
 
@@ -182,6 +151,50 @@ def test_ws_starts_mcp_discovery_before_ready(monkeypatch):
     # should not start MCP discovery before a profile has been bound.
     assert calls == []
     assert events == ["accept", "ready_after_0"]
+
+
+def test_ws_ready_advertises_heartbeat_and_ping_is_inline(monkeypatch):
+    sent = []
+    inbound = iter(
+        [
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "heartbeat-1",
+                    "method": "gateway.ping",
+                    "params": {},
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            sent.append(json.loads(line))
+
+        async def receive_text(self):
+            try:
+                return next(inbound)
+            except StopIteration:
+                raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS()))
+
+    ready = sent[0]["params"]
+    assert ready["type"] == "gateway.ready"
+    assert ready["payload"]["heartbeat"] is True
+    assert sent[1] == {
+        "jsonrpc": "2.0",
+        "result": {"ok": True},
+        "id": "heartbeat-1",
+    }
 
 
 def test_ws_transport_serializes_concurrent_sends():
