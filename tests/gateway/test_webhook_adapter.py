@@ -370,6 +370,138 @@ class TestEventFilter:
             )
             assert resp.status == 202
 
+    @pytest.mark.asyncio
+    async def test_event_filter_accepts_gitea_event_header(self):
+        """Gitea's event header participates in route event filtering."""
+        routes = {
+            "gitea": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request_review_approved"],
+                "prompt": "Review: {action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/gitea",
+                json={"action": "approved"},
+                headers={"X-Gitea-Event": "pull_request_review_approved"},
+            )
+
+        assert resp.status == 202
+        adapter.handle_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gitea_event_filter_runs_only_after_hmac_authentication(self):
+        """A matching Gitea event dispatches only with a valid HMAC."""
+        secret = "gitea-route-secret"
+        body = b'{"action":"approved"}'
+        routes = {
+            "gitea": {
+                "secret": secret,
+                "events": ["pull_request_review_approved"],
+                "prompt": "Review: {action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            invalid = await cli.post(
+                "/webhooks/gitea",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gitea-Event": "pull_request_review_approved",
+                    "X-Hub-Signature-256": "sha256=invalid",
+                },
+            )
+            assert invalid.status == 401
+            adapter.handle_message.assert_not_awaited()
+
+            valid = await cli.post(
+                "/webhooks/gitea",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gitea-Event": "pull_request_review_approved",
+                    "X-Hub-Signature-256": _github_signature(body, secret),
+                },
+            )
+
+        assert valid.status == 202
+        adapter.handle_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gitea_specific_event_type_header_wins_over_normalized_headers(self):
+        """Gitea 1.27.1's specific approval trigger dispatches after HMAC auth."""
+        secret = "gitea-route-secret"
+        body = b'{"action":"approved"}'
+        routes = {
+            "gitea": {
+                "secret": secret,
+                "events": ["pull_request_review_approved"],
+                "prompt": "Review: {action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                "/webhooks/gitea",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gitea-Event": "pull_request_approved",
+                    "X-GitHub-Event": "pull_request_approved",
+                    "X-Gitea-Event-Type": "pull_request_review_approved",
+                    "X-GitHub-Event-Type": "pull_request_review_approved",
+                    "X-Hub-Signature-256": _github_signature(body, secret),
+                },
+            )
+
+        assert response.status == 202
+        adapter.handle_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gitea_normalized_event_route_still_matches_full_header_set(self):
+        """A normalized Gitea route still matches when specific headers exist."""
+        secret = "gitea-route-secret"
+        body = b'{"action":"approved"}'
+        routes = {
+            "gitea": {
+                "secret": secret,
+                "events": ["pull_request_approved"],
+                "prompt": "Review: {action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                "/webhooks/gitea",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gitea-Event": "pull_request_approved",
+                    "X-GitHub-Event": "pull_request_approved",
+                    "X-Gitea-Event-Type": "pull_request_review_approved",
+                    "X-GitHub-Event-Type": "pull_request_review_approved",
+                    "X-Hub-Signature-256": _github_signature(body, secret),
+                },
+            )
+
+        assert response.status == 202
+        adapter.handle_message.assert_awaited_once()
+
 
 # ===================================================================
 # Payload filters
