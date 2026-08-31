@@ -40,6 +40,11 @@ export type ChatMessage = {
   attachmentRefs?: string[]
   /** Durable backend `messages.id`. Absent until the row is persisted. */
   rowId?: number
+  /** Stable identity of the live gateway turn. Absent on legacy gateways and settled history. */
+  liveTurnId?: string
+  /** Local accepted mid-turn redirect. Keeps completion ordering deterministic
+   * when no post-redirect assistant payload arrives. */
+  midTurnCorrection?: boolean
   /** Emoji reactions on this message — one per author (see MessageReaction). */
   reactions?: MessageReaction[]
 }
@@ -49,6 +54,8 @@ export type GatewayEventPayload = {
    * its local receipt clock when older gateways omit it. */
   timestamp?: number
   text?: string
+  already_streamed?: boolean
+  segment_id?: string
   rendered?: string
   status?: string
   message?: string
@@ -70,6 +77,7 @@ export type GatewayEventPayload = {
   error_surface?: unknown
   inline_diff?: string
   duration_s?: number
+  turn_id?: string
   todos?: unknown
   model?: string
   provider?: string

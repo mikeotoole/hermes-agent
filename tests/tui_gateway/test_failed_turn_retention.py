@@ -132,7 +132,15 @@ def test_healthy_snapshot_carries_no_error_keys():
     server._append_inflight_delta(session, "hello")
 
     snapshot = server._inflight_snapshot(session)
-    assert snapshot == {"assistant": "hello", "streaming": True, "user": "hi"}
+    assert snapshot is not None
+    assert snapshot["assistant"] == "hello"
+    assert snapshot["streaming"] is True
+    assert snapshot["user"] == "hi"
+    assert isinstance(snapshot.get("turn_id"), str)
+    assert snapshot["turn_id"]
+    assert "error" not in snapshot
+    assert "status" not in snapshot
+    assert "recoverable" not in snapshot
 
 
 # ── Returned-error path (run_conversation returns an error result) ────

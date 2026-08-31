@@ -4,6 +4,8 @@ const secondaryGateways: Array<{
   close: ReturnType<typeof vi.fn>
   connect: ReturnType<typeof vi.fn>
   connectionState: string
+  emitReplayGap: (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void
+  onReplayGap: ReturnType<typeof vi.fn>
   request: ReturnType<typeof vi.fn>
 }> = []
 
@@ -11,6 +13,7 @@ let connectGate: Promise<void> | null = null
 
 vi.mock('@/hermes', () => ({
   HermesGateway: class {
+    private replayGapHandler: ((gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void) | null = null
     connectionState = 'closed'
     connect = vi.fn(async () => {
       if (this.connectionState === 'connecting') {
@@ -34,7 +37,17 @@ vi.mock('@/hermes', () => ({
     })
     close = vi.fn()
     onEvent = vi.fn(() => () => {})
+    onReplayGap = vi.fn((handler: (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void) => {
+      this.replayGapHandler = handler
+
+      return () => {
+        this.replayGapHandler = null
+      }
+    })
     onState = vi.fn(() => () => {})
+    emitReplayGap = (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }): void => {
+      this.replayGapHandler?.(gap)
+    }
 
     constructor() {
       secondaryGateways.push(this)
@@ -54,9 +67,12 @@ const {
   gatewayActivationEpoch,
   disposeSecondariesForConnection,
   openGatewayForAgent,
+  primaryGatewayProfileKey,
   pruneSecondaryGateways,
   requestGatewayForAgent,
   requestGatewayForProfile,
+  replayGapMatchesActiveGateway,
+  replayGapRecoveryStillCurrent,
   retainGatewayForAgent,
   setPrimaryGateway,
   setPrimaryGatewayConnection
@@ -471,6 +487,131 @@ describe('requestGatewayForAgent', () => {
     expect(await abandoned).toBe(false)
     expect(onActiveConnectionChanged).not.toHaveBeenCalled()
     expect($gateway.get()).toBe(primary)
+  })
+})
+
+describe('replay-gap source ownership and HMR migration', () => {
+  function installRegistryDesktop() {
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getConnection: vi.fn(async (profile: null | string) => ({ port: 4242, profile, token: 't' })),
+      getConnectionFor: vi.fn(async ({ connectionId, profile }) => ({ connectionId, port: 5151, profile })),
+      getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }) => ({
+        ok: true as const,
+        wsUrl: `ws://${connectionId}/${profile}`
+      })),
+      touchBackend: vi.fn(async () => undefined)
+    }
+  }
+
+  it('tags pooled gaps with their exact source and matches only the active route', async () => {
+    const onReplayGap = vi.fn()
+    const primary = makePrimary()
+
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'source-a' })
+    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap })
+    installRegistryDesktop()
+    await ensureGatewayForAgent('source-b', 'worker')
+
+    secondaryGateways[0].emitReplayGap({ reason: 'epoch-changed', sessionIds: ['runtime-collision'] })
+
+    const scopedGap = {
+      connectionId: 'source-b',
+      profile: 'worker',
+      reason: 'epoch-changed' as const,
+      sessionIds: ['runtime-collision']
+    }
+
+    expect(onReplayGap).toHaveBeenCalledWith(scopedGap)
+
+    expect(replayGapMatchesActiveGateway(scopedGap)).toBe(true)
+    expect(replayGapMatchesActiveGateway({ ...scopedGap, connectionId: 'source-a' })).toBe(false)
+  })
+
+  it('uses the adopted non-default primary profile for callback-time gap scoping', async () => {
+    const primary = makePrimary()
+
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGateway(primary as never, 'worker')
+    setPrimaryGatewayConnection({ connectionId: 'shared-source' })
+    installRegistryDesktop()
+    await ensureGatewayForAgent('shared-source', 'worker')
+
+    expect(primaryGatewayProfileKey()).toBe('worker')
+    expect(
+      replayGapMatchesActiveGateway({
+        connectionId: 'shared-source',
+        profile: primaryGatewayProfileKey(),
+        reason: 'truncated',
+        sessionIds: ['runtime-collision']
+      })
+    ).toBe(true)
+    expect(
+      replayGapMatchesActiveGateway({
+        connectionId: 'shared-source',
+        profile: 'default',
+        reason: 'truncated',
+        sessionIds: ['runtime-collision']
+      })
+    ).toBe(false)
+  })
+
+  it('invalidates replay-gap recovery when the active source generation changes', async () => {
+    const primary = makePrimary()
+
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'source-a' })
+    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap: vi.fn() })
+    installRegistryDesktop()
+    await ensureGatewayForAgent('source-b', 'worker')
+
+    const gap = {
+      connectionId: 'source-b',
+      profile: 'worker',
+      reason: 'epoch-changed' as const,
+      sessionIds: ['runtime-collision']
+    }
+
+    const acceptedEpoch = gatewayActivationEpoch()
+
+    expect(replayGapRecoveryStillCurrent(gap, acceptedEpoch)).toBe(true)
+
+    await ensureGatewayForAgent('source-c', 'other')
+
+    expect(replayGapRecoveryStillCurrent(gap, acceptedEpoch)).toBe(false)
+  })
+
+  it('upgrades and safely disposes an HMR-preserved pre-gap secondary shape', async () => {
+    const primary = makePrimary()
+
+    setPrimaryGateway(primary as never, 'default')
+    installRegistryDesktop()
+    await openGatewayForAgent('source-b', 'worker', { activationLease: true })
+
+    const state = (
+      globalThis as unknown as {
+        [key: symbol]: {
+          secondaries: Map<
+            string,
+            { gateway: { onReplayGap: ReturnType<typeof vi.fn> }; offReplayGap?: () => void }
+          >
+        }
+      }
+    )[Symbol.for('hermes.desktop.gatewayRegistryState')]
+
+    const entry = [...state.secondaries.values()][0]
+
+    entry.offReplayGap?.()
+    delete entry.offReplayGap
+    const onReplayGap = vi.fn()
+    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap })
+
+    expect(entry.gateway.onReplayGap).toHaveBeenCalledTimes(2)
+
+    delete entry.offReplayGap
+
+    expect(() => closeSecondaryGateways()).not.toThrow()
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 })
 

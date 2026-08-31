@@ -1,4 +1,10 @@
-import { type ConnectionState, type GatewayEvent, registryBackendScopeKey, resolveGatewayWsUrl } from '@hermes/shared'
+import {
+  type ConnectionState,
+  type GatewayEvent,
+  registryBackendScopeKey,
+  type ReplayGap,
+  resolveGatewayWsUrl
+} from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import type { HermesConnection } from '@/global'
@@ -24,12 +30,18 @@ const normKey = (profile: string | null | undefined): string => (profile ?? '').
 // narrow the getter to a constant across guards (it genuinely changes).
 const isOpen = (gateway: HermesGateway | null): boolean => gateway?.connectionState === 'open'
 
+export interface ScopedReplayGap extends ReplayGap {
+  connectionId: null | string
+  profile: string
+}
+
 interface RegistryConfig {
   /** Electron's published descriptor is authoritative for a primary gateway's
    * registry identity. Kept as a getter so gateway.ts does not own or duplicate
    * the connection store. */
   activeConnectionId?: () => null | string
   onEvent: (event: GatewayEvent) => void
+  onReplayGap?: (gap: ScopedReplayGap) => void
   onActiveConnectionInvalidated?: (fallbackProfile: string, activationEpoch: number) => void
   onActiveConnectionChanged?: (connection: HermesConnection) => void
   /**
@@ -70,6 +82,8 @@ interface Secondary {
   activeRequests: number
   connectPromise: Promise<void> | null
   offEvent: () => void
+  /** Optional because HMR can preserve entries created before replay gaps existed. */
+  offReplayGap?: () => void
   offState: () => void
   reconnectTimer: ReturnType<typeof setTimeout> | null
   reconnectAttempt: number
@@ -221,8 +235,17 @@ export function activeGatewayProfileKey(): string {
   return g.$activeProfile.get()
 }
 
+/** Bare profile name served by the window's primary socket, even when a secondary is active. */
+export function primaryGatewayProfileKey(): string {
+  return g.primaryProfile
+}
+
 export function configureGatewayRegistry(cfg: RegistryConfig): void {
   g.config = cfg
+
+  for (const entry of g.secondaries.values()) {
+    subscribeSecondaryReplayGaps(entry)
+  }
 }
 
 /**
@@ -334,6 +357,19 @@ export function activeGatewayConnectionId(): null | string {
   }
 
   return g.secondaries.get(g.activeKey)?.connectionId ?? null
+}
+
+/** Registry connection owned by the window's primary socket, independent of the active route. */
+export function primaryGatewayConnectionId(): null | string {
+  return g.primaryConnectionId
+}
+
+export function replayGapMatchesActiveGateway(gap: ScopedReplayGap): boolean {
+  return gap.profile === activeGatewayProfileKey() && gap.connectionId === activeGatewayConnectionId()
+}
+
+export function replayGapRecoveryStillCurrent(gap: ScopedReplayGap, acceptedActivationEpoch: number): boolean {
+  return gatewayActivationEpoch() === acceptedActivationEpoch && replayGapMatchesActiveGateway(gap)
 }
 
 /**
@@ -675,6 +711,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
     g.config?.onEvent({ ...event, profile, ...(connectionId ? { connectionId } : {}) })
     releaseTerminalTurnLease(entry.scope, event)
   })
+  subscribeSecondaryReplayGaps(entry)
   entry.offState = gateway.onState(state => {
     reportGatewayState(scope, state)
 
@@ -696,6 +733,19 @@ function createSecondary(profile: string, connectionId: null | string = null): S
   g.secondaries.set(scope, entry)
 
   return entry
+}
+
+function subscribeSecondaryReplayGaps(entry: Secondary): void {
+  if (typeof entry.offReplayGap === 'function') {
+    return
+  }
+
+  entry.offReplayGap =
+    typeof entry.gateway.onReplayGap === 'function'
+      ? entry.gateway.onReplayGap(gap =>
+          g.config?.onReplayGap?.({ ...gap, connectionId: entry.connectionId, profile: entry.profile })
+        )
+      : () => undefined
 }
 
 // True when `profile`'s backend route resolves to the SHARED primary backend
@@ -1300,18 +1350,19 @@ export async function openGatewayForAgent(
 export async function ensureGatewayForAgent(
   connectionId: null | string,
   profile: string,
-  { signal }: { signal?: AbortSignal } = {}
+  { beforeActivate, signal }: EnsureGatewayForProfileOptions = {}
 ): Promise<boolean> {
   const scope = registryBackendScopeKey(connectionId, profile)
+  const mayActivate = () => !signal?.aborted && (beforeActivate?.() ?? true)
 
   if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
-    if (signal?.aborted) {
+    if (!mayActivate()) {
       return false
     }
 
-    await ensureGatewayForProfile(profile)
-
-    return !signal?.aborted
+    return beforeActivate || signal
+      ? ensureGatewayForProfile(profile, { beforeActivate, signal })
+      : ensureGatewayForProfile(profile)
   }
 
   if (!window.hermesDesktop?.getConnectionFor) {
@@ -1350,7 +1401,7 @@ export async function ensureGatewayForAgent(
 
   // A timed-out owner may leave the dial running, but it no longer has the
   // right to move the foreground route when that work eventually settles.
-  if (signal?.aborted) {
+  if (!mayActivate()) {
     return false
   }
 
@@ -1366,6 +1417,7 @@ export async function ensureGatewayForAgent(
     g.secondaries.get(scope) === entry &&
     Boolean(entry.connection) &&
     isOpen(entry.gateway) &&
+    mayActivate() &&
     applyActive(scope, activationEpoch)
 
   if (activated && entry.connection) {
@@ -1377,14 +1429,25 @@ export async function ensureGatewayForAgent(
 
 // Make `profile` the active gateway, lazily opening its socket if needed. The
 // primary is a no-op fast path. Background sockets are never closed here.
-export async function ensureGatewayForProfile(profile: string): Promise<void> {
+export interface EnsureGatewayForProfileOptions {
+  beforeActivate?: () => boolean
+  signal?: AbortSignal
+}
+
+export async function ensureGatewayForProfile(
+  profile: string,
+  { beforeActivate, signal }: EnsureGatewayForProfileOptions = {}
+): Promise<boolean> {
   const key = normKey(profile)
   const activationEpoch = beginGatewayActivation()
+  const mayActivate = () => !signal?.aborted && (beforeActivate?.() ?? true)
 
   if (key === g.primaryProfile) {
-    applyActive(key, activationEpoch)
+    if (!mayActivate()) {
+      return false
+    }
 
-    return
+    return applyActive(key, activationEpoch)
   }
 
   // Global-remote share (routing case 3): one remote host serves every
@@ -1393,9 +1456,15 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
   // descriptor — $activeGatewayProfile still moves to `key`, so request
   // scoping and profile-aware surfaces behave identically.
   if (await sharedPrimaryRoute(key)) {
-    applyActive(g.primaryProfile, activationEpoch)
+    if (!mayActivate()) {
+      return false
+    }
 
-    return
+    return applyActive(g.primaryProfile, activationEpoch)
+  }
+
+  if (!mayActivate()) {
+    return false
   }
 
   let entry = g.secondaries.get(key)
@@ -1434,6 +1503,10 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
     entry.activationLeaseUntil = 0
   }
 
+  if (!mayActivate()) {
+    return false
+  }
+
   // Only publish when the WebSocket actually reached open -- entry.connection
   // is set before the dial completes, so a transient first-dial failure must
   // not count as a successful activation (issue #92265).
@@ -1445,7 +1518,11 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
     entry.connection
   ) {
     publishActiveConnection(entry.connection)
+
+    return true
   }
+
+  return false
 }
 
 // Reconnect the active gateway after a transient request failure. Primary
@@ -1529,6 +1606,7 @@ function disposeSecondary(entry: Secondary): void {
   entry.wantOpen = false
   clearTimer(entry)
   entry.offEvent()
+  entry.offReplayGap?.()
   entry.offState()
   entry.gateway.close()
 }

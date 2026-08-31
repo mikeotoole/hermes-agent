@@ -557,11 +557,30 @@ describe('reconcileResumeMessages', () => {
     expect(out.parts.some(p => p.type === 'reasoning')).toBe(true)
   })
 
+  it('does not graft structural parts across distinct equal-text live turns', () => {
+    const next = [
+      msg('authoritative-next', 'assistant', 'repeated answer', {
+        liveTurnId: 'turn-next'
+      })
+    ]
+    const previous = [
+      streamingMsg('assistant-stream-previous', 'repeated answer', {
+        liveTurnId: 'turn-previous'
+      })
+    ]
+
+    const [out] = reconcileResumeMessages(next, previous)
+
+    expect(out.liveTurnId).toBe('turn-next')
+    expect(out.parts).toEqual([{ type: 'text', text: 'repeated answer' }])
+  })
+
   it('preserves attachment refs for a matching user turn', () => {
-    const next = [msg('stored-user', 'user', 'describe this image')]
+    const next = [msg('stored-user', 'user', 'describe this image', { liveTurnId: 'turn-image' })]
 
     const previous = [
       msg('live-user', 'user', 'describe this image', {
+        liveTurnId: 'turn-image',
         attachmentRefs: ['@image:/tmp/photo.png']
       })
     ]
@@ -608,10 +627,13 @@ describe('reconcileResumeMessages', () => {
   it('prefers a richer local pending assistant over an empty projection shell', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'hello from stream', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'hello from stream', { liveTurnId: 'turn-shell', pending: true })
     ]
 
-    const next = [msg('1-user', 'user', 'question'), msg('assistant-stream-sess', 'assistant', '', { pending: true })]
+    const next = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: true })
+    ]
 
     const reconciled = reconcileResumeMessages(next, previous)
 
@@ -622,12 +644,12 @@ describe('reconcileResumeMessages', () => {
   it('prefers a richer local pending assistant when the projection lags mid-stream', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'hello world', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'hello world', { liveTurnId: 'turn-1', pending: true })
     ]
 
     const next = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-sess', 'assistant', 'hello', { pending: true })
+      msg('assistant-stream-sess', 'assistant', 'hello', { liveTurnId: 'turn-1', pending: true })
     ]
 
     const reconciled = reconcileResumeMessages(next, previous)
@@ -657,11 +679,14 @@ describe('reconcileResumeMessages', () => {
   // row holds reasoning + tool calls and NO text yet, so both bodies are empty
   // text and a text-length comparison cannot tell them apart.
   it('prefers a traces-only local pending row over an empty shell', () => {
-    const previous = [msg('1-user', 'user', 'run the tools'), streamingMsg('assistant-stream-live', '')]
+    const previous = [
+      msg('1-user', 'user', 'run the tools'),
+      streamingMsg('assistant-stream-live', '', { liveTurnId: 'turn-shell' })
+    ]
 
     const next = [
       msg('1-user', 'user', 'run the tools'),
-      msg('assistant-stream-sess', 'assistant', '', { pending: true })
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: true })
     ]
 
     const reconciled = reconcileResumeMessages(next, previous)
@@ -712,10 +737,13 @@ describe('reconcileResumeMessages', () => {
   it('takes the local body but the authoritative settled state', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'streamed body', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'streamed body', { liveTurnId: 'turn-shell', pending: true })
     ]
 
-    const next = [msg('1-user', 'user', 'question'), msg('assistant-stream-sess', 'assistant', '', { pending: false })]
+    const next = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: false })
+    ]
 
     const reconciled = reconcileResumeMessages(next, previous)
 
@@ -746,15 +774,15 @@ describe('preserveLocalPendingTurnMessages', () => {
     const previous = [
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
-      msg('user-optimistic', 'user', 'new question'),
-      msg('assistant-stream-1', 'assistant', 'partial answer', { pending: true })
+      msg('user-optimistic', 'user', 'new question', { liveTurnId: 'turn-new' }),
+      msg('assistant-stream-1', 'assistant', 'partial answer', { liveTurnId: 'turn-new', pending: true })
     ]
 
     const next = [
       msg('1-user-stored', 'user', 'first'),
       msg('2-assistant-stored', 'assistant', 'first answer'),
-      msg('3-user-stored', 'user', 'new question'),
-      msg('4-assistant-stored', 'assistant', 'complete answer')
+      msg('3-user-stored', 'user', 'new question', { liveTurnId: 'turn-new' }),
+      msg('4-assistant-stored', 'assistant', 'complete answer', { liveTurnId: 'turn-new' })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -781,17 +809,35 @@ describe('preserveLocalPendingTurnMessages', () => {
 
   it('drops the live tail once the latest authoritative user has persisted it after compression', () => {
     const compressedAuthority = [
-      msg('stored-user', 'user', 'the one genuinely in-flight prompt'),
+      msg('stored-user', 'user', 'the one genuinely in-flight prompt', { liveTurnId: 'turn-live' }),
       msg('stored-assistant', 'assistant', 'its authoritative reply')
     ]
 
     const pollutedWarmCache = [
       msg('user-old-1', 'user', 'compressed-away prompt one'),
       msg('assistant-old-1', 'assistant', 'compressed-away reply one'),
-      msg('user-inflight', 'user', 'the one genuinely in-flight prompt')
+      msg('user-inflight', 'user', 'the one genuinely in-flight prompt', { liveTurnId: 'turn-live' })
     ]
 
     expect(preserveLocalPendingTurnMessages(compressedAuthority, pollutedWarmCache)).toBe(compressedAuthority)
+  })
+
+  it('preserves an equal-text optimistic user row owned by a different live turn', () => {
+    const authoritative = [
+      msg('stored-user-other-turn', 'user', 'repeat this prompt', {
+        liveTurnId: 'turn-authoritative'
+      })
+    ]
+    const local = [
+      msg('user-live-turn', 'user', 'repeat this prompt', {
+        liveTurnId: 'turn-local'
+      })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(authoritative, local).map(message => message.id)).toEqual([
+      'stored-user-other-turn',
+      'user-live-turn'
+    ])
   })
 
   // A mid-turn redirect inserts its correction as a SECOND optimistic user row
@@ -860,14 +906,14 @@ describe('preserveLocalPendingTurnMessages', () => {
     const previous = [
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
-      msg('user-optimistic', 'user', 'second question')
+      msg('user-optimistic', 'user', 'second question', { liveTurnId: 'turn-second' })
     ]
 
     const next = [
       msg('s1-user', 'user', 'first'),
       msg('s2-assistant', 'assistant', 'first answer'),
       msg('s3-marker', 'user', marker('k2')),
-      msg('s4-user', 'user', 'second question'),
+      msg('s4-user', 'user', 'second question', { liveTurnId: 'turn-second' }),
       msg('s5-assistant', 'assistant', 'second answer'),
       msg('s6-marker', 'user', marker('k3'))
     ]
@@ -909,6 +955,7 @@ describe('preserveLocalPendingTurnMessages', () => {
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
       msg('user-optimistic', 'user', 'what is in this photo?', {
+        liveTurnId: 'turn-ref',
         attachmentRefs: ['@image:/tmp/cat.png']
       })
     ]
@@ -916,7 +963,7 @@ describe('preserveLocalPendingTurnMessages', () => {
     const next = [
       msg('1-user-stored', 'user', 'first'),
       msg('2-assistant-stored', 'assistant', 'first answer'),
-      msg('3-user-stored', 'user', '@image:/tmp/cat.png\nwhat is in this photo?')
+      msg('3-user-stored', 'user', '@image:/tmp/cat.png\nwhat is in this photo?', { liveTurnId: 'turn-ref' })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -927,6 +974,7 @@ describe('preserveLocalPendingTurnMessages', () => {
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
       msg('user-optimistic', 'user', 'text', {
+        liveTurnId: 'turn-ref',
         attachmentRefs: ['@file:X']
       })
     ]
@@ -934,7 +982,7 @@ describe('preserveLocalPendingTurnMessages', () => {
     const next = [
       msg('1-user-stored', 'user', 'first'),
       msg('2-assistant-stored', 'assistant', 'first answer'),
-      msg('3-user-stored', 'user', '@file:X\n\ntext')
+      msg('3-user-stored', 'user', '@file:X\n\ntext', { liveTurnId: 'turn-ref' })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -949,6 +997,7 @@ describe('preserveLocalPendingTurnMessages', () => {
         msg('1-user', 'user', 'first'),
         msg('2-assistant', 'assistant', 'first answer'),
         msg('user-optimistic', 'user', 'text', {
+          liveTurnId: 'turn-ref',
           attachmentRefs: [ref]
         })
       ]
@@ -956,7 +1005,7 @@ describe('preserveLocalPendingTurnMessages', () => {
       const next = [
         msg('1-user-stored', 'user', 'first'),
         msg('2-assistant-stored', 'assistant', 'first answer'),
-        msg('3-user-stored', 'user', `${ref}\n\ntext`)
+        msg('3-user-stored', 'user', `${ref}\n\ntext`, { liveTurnId: 'turn-ref' })
       ]
 
       expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -968,6 +1017,7 @@ describe('preserveLocalPendingTurnMessages', () => {
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
       msg('user-optimistic', 'user', '', {
+        liveTurnId: 'turn-ref',
         attachmentRefs: ['@file:X']
       })
     ]
@@ -975,7 +1025,7 @@ describe('preserveLocalPendingTurnMessages', () => {
     const next = [
       msg('1-user-stored', 'user', 'first'),
       msg('2-assistant-stored', 'assistant', 'first answer'),
-      msg('3-user-stored', 'user', '@file:X')
+      msg('3-user-stored', 'user', '@file:X', { liveTurnId: 'turn-ref' })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -988,6 +1038,7 @@ describe('preserveLocalPendingTurnMessages', () => {
       msg('1-user', 'user', 'first'),
       msg('2-assistant', 'assistant', 'first answer'),
       msg('user-optimistic', 'user', 'text', {
+        liveTurnId: 'turn-ref',
         attachmentRefs: refs
       })
     ]
@@ -995,7 +1046,7 @@ describe('preserveLocalPendingTurnMessages', () => {
     const next = [
       msg('1-user-stored', 'user', 'first'),
       msg('2-assistant-stored', 'assistant', 'first answer'),
-      msg('3-user-stored', 'user', `${refs.join('\r\n')}\r\n\r\ntext`)
+      msg('3-user-stored', 'user', `${refs.join('\r\n')}\r\n\r\ntext`, { liveTurnId: 'turn-ref' })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -1038,16 +1089,42 @@ describe('preserveLocalPendingTurnMessages', () => {
   it('replaces an empty inflight shell with a fuller local pending assistant', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'partial answer so far', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'partial answer so far', { liveTurnId: 'turn-shell', pending: true })
     ]
 
-    const next = [msg('1-user', 'user', 'question'), msg('assistant-stream-sess', 'assistant', '', { pending: true })]
+    const next = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: true })
+    ]
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
 
     expect(preserved.map(message => message.id)).toEqual(['1-user', 'assistant-stream-live'])
     expect(chatMessageText(preserved[1])).toBe('partial answer so far')
     expect(preserved[1].pending).toBe(true)
+  })
+
+  it('does not replace an empty inflight shell with content from another live turn', () => {
+    const previous = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-local', 'assistant', 'other turn content', {
+        liveTurnId: 'turn-local',
+        pending: true
+      })
+    ]
+    const next = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-authoritative', 'assistant', '', {
+        liveTurnId: 'turn-authoritative',
+        pending: true
+      })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '1-user',
+      'assistant-stream-authoritative',
+      'assistant-stream-local'
+    ])
   })
 
   it('replaces a lagging same-id shell with the fuller local pending body', () => {
@@ -1067,12 +1144,12 @@ describe('preserveLocalPendingTurnMessages', () => {
   it('still drops local pending when authoritative text is at least as complete', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'partial', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'partial', { liveTurnId: 'turn-answer', pending: true })
     ]
 
     const next = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-sess', 'assistant', 'partial and more', { pending: true })
+      msg('assistant-stream-sess', 'assistant', 'partial and more', { liveTurnId: 'turn-answer', pending: true })
     ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
@@ -1081,11 +1158,14 @@ describe('preserveLocalPendingTurnMessages', () => {
   // Mid tool-work both bodies are empty text, so only the parts distinguish the
   // live row from the shell — the reported "no inference traces or tool calls".
   it('replaces an empty shell with a traces-only local pending row', () => {
-    const previous = [msg('1-user', 'user', 'run the tools'), streamingMsg('assistant-stream-live', '')]
+    const previous = [
+      msg('1-user', 'user', 'run the tools'),
+      streamingMsg('assistant-stream-live', '', { liveTurnId: 'turn-shell' })
+    ]
 
     const next = [
       msg('1-user', 'user', 'run the tools'),
-      msg('assistant-stream-sess', 'assistant', '', { pending: true })
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: true })
     ]
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
@@ -1097,7 +1177,7 @@ describe('preserveLocalPendingTurnMessages', () => {
   // Length alone is not identity: a longer local row that does not extend the
   // authoritative text belongs to another turn and must not take its slot — by
   // ordinal or by reusing the stream id.
-  it('leaves a shorter non-prefix authoritative assistant intact', () => {
+  it('preserves an identity-ambiguous local assistant beside a shorter non-prefix authoritative row', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
       msg('assistant-stream-live', 'assistant', 'a long local reply about something else entirely', { pending: true })
@@ -1107,7 +1187,7 @@ describe('preserveLocalPendingTurnMessages', () => {
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
 
-    expect(preserved.map(message => message.id)).toEqual(['1-user', '9-assistant'])
+    expect(preserved.map(message => message.id)).toEqual(['1-user', '9-assistant', 'assistant-stream-live'])
     expect(chatMessageText(preserved[1])).toBe('short authoritative answer')
   })
 
@@ -1147,10 +1227,13 @@ describe('preserveLocalPendingTurnMessages', () => {
   it('takes the local body but the authoritative settled state', () => {
     const previous = [
       msg('1-user', 'user', 'question'),
-      msg('assistant-stream-live', 'assistant', 'streamed body', { pending: true })
+      msg('assistant-stream-live', 'assistant', 'streamed body', { liveTurnId: 'turn-shell', pending: true })
     ]
 
-    const next = [msg('1-user', 'user', 'question'), msg('assistant-stream-sess', 'assistant', '', { pending: false })]
+    const next = [
+      msg('1-user', 'user', 'question'),
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: false })
+    ]
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
 
@@ -1162,10 +1245,35 @@ describe('preserveLocalPendingTurnMessages', () => {
   // stream row sits at a later ordinal, pairs with nothing, and gets appended —
   // the same answer twice.
   it('does not re-append a settled stream row the authoritative history already carries', () => {
-    const next = [msg('1-user-stored', 'user', 'question'), msg('2-assistant-stored', 'assistant', 'answer')]
-    const settledLocalStream = msg('assistant-stream-runtime-1', 'assistant', 'answer', { pending: false })
+    const next = [
+      msg('1-user-stored', 'user', 'question'),
+      msg('2-assistant-stored', 'assistant', 'answer', { liveTurnId: 'turn-answer' })
+    ]
+    const settledLocalStream = msg('assistant-stream-runtime-1', 'assistant', 'answer', {
+      liveTurnId: 'turn-answer',
+      pending: false
+    })
 
     expect(preserveLocalPendingTurnMessages(next, [...next, settledLocalStream])).toBe(next)
+  })
+
+  it('preserves an equal-text settled stream row owned by a different live turn', () => {
+    const authoritative = [
+      msg('assistant-stored-other-turn', 'assistant', 'repeated answer', {
+        liveTurnId: 'turn-authoritative'
+      })
+    ]
+    const local = [
+      msg('assistant-stream-local-turn', 'assistant', 'repeated answer', {
+        liveTurnId: 'turn-local',
+        pending: false
+      })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(authoritative, local).map(message => message.id)).toEqual([
+      'assistant-stored-other-turn',
+      'assistant-stream-local-turn'
+    ])
   })
 
   // The reply finished locally but the gateway had not committed it when the
@@ -1193,8 +1301,14 @@ describe('preserveLocalPendingTurnMessages', () => {
       msg('3-user', 'user', 'run the tools')
     ]
 
-    const previous = [...history, streamingMsg('assistant-stream-live', 'here is the full reply')]
-    const next = [...history, msg('assistant-stream-sess', 'assistant', '', { pending: true })]
+    const previous = [
+      ...history,
+      streamingMsg('assistant-stream-live', 'here is the full reply', { liveTurnId: 'turn-shell' })
+    ]
+    const next = [
+      ...history,
+      msg('assistant-stream-sess', 'assistant', '', { liveTurnId: 'turn-shell', pending: true })
+    ]
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
 
@@ -1212,15 +1326,18 @@ describe('preserveLocalPendingTurnMessages', () => {
     const previous = [
       msg('1-user', 'user', '查金价'),
       msg('2-a', 'assistant', 'X'),
-      streamingMsg('assistant-stream-live', '面板内容')
+      streamingMsg('assistant-stream-live', '面板内容', { liveTurnId: 'turn-panel' })
     ]
 
-    const next = [msg('1-user', 'user', '查金价'), msg('9-assistant', 'assistant', '面板内容')]
+    const next = [
+      msg('1-user', 'user', '查金价'),
+      msg('9-assistant', 'assistant', '面板内容', { liveTurnId: 'turn-panel' })
+    ]
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
   })
 
-  it('drops a pending stream row whose text the committed authoritative reply extends', () => {
+  it('does not infer that a committed prefix belongs to the pending live turn', () => {
     const previous = [
       msg('1-user', 'user', '查金价'),
       msg('2-a', 'assistant', 'X'),
@@ -1229,10 +1346,14 @@ describe('preserveLocalPendingTurnMessages', () => {
 
     const next = [msg('1-user', 'user', '查金价'), msg('9-assistant', 'assistant', '面板内容完整版')]
 
-    expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '1-user',
+      '9-assistant',
+      'assistant-stream-live'
+    ])
   })
 
-  it('replaces the committed row with a further-along pending copy instead of appending', () => {
+  it('does not replace a committed row from text-prefix inference', () => {
     const previous = [
       msg('1-user', 'user', '查金价'),
       msg('2-a', 'assistant', 'X'),
@@ -1243,8 +1364,9 @@ describe('preserveLocalPendingTurnMessages', () => {
 
     const preserved = preserveLocalPendingTurnMessages(next, previous)
 
-    expect(preserved.map(message => message.id)).toEqual(['1-user', '9-assistant'])
-    expect(chatMessageText(preserved[1])).toBe('面板内容完整版')
+    expect(preserved.map(message => message.id)).toEqual(['1-user', '9-assistant', 'assistant-stream-live'])
+    expect(chatMessageText(preserved[1])).toBe('面板')
+    expect(chatMessageText(preserved[2])).toBe('面板内容完整版')
   })
 
   // The authoritative history genuinely does not have this reply yet — the
@@ -1263,6 +1385,273 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('restores stable interim boundaries without duplicating streamed text', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        user: 'current prompt',
+        assistant: 'streamed checkpointremaining answer',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-1',
+            text: 'streamed checkpoint',
+            already_streamed: true,
+            assistant_offset: 'streamed checkpoint'.length
+          },
+          {
+            segment_id: 'stable-2',
+            text: 'tool-call commentary',
+            already_streamed: false,
+            assistant_offset: 'streamed checkpoint'.length
+          }
+        ]
+      }
+    } as any)
+
+    expect(restored.map(message => message.id)).toEqual([
+      'user-inflight-runtime-1',
+      'assistant-interim-stable-1',
+      'assistant-interim-stable-2',
+      'assistant-stream-runtime-1'
+    ])
+    expect(restored.map(message => chatMessageText(message))).toEqual([
+      'current prompt',
+      'streamed checkpoint',
+      'tool-call commentary',
+      'remaining answer'
+    ])
+    expect(restored[1]).toMatchObject({ pending: false })
+    expect(restored[2]).toMatchObject({ pending: false })
+    expect(restored[3]).toMatchObject({ pending: true })
+  })
+
+  it('restores an exact commentary boundary without losing ordinary streamed text', () => {
+    const prefix = 'ordinary answerhello   there'
+
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: `${prefix}remaining answer`,
+        streaming: true,
+        interim: [
+          {
+            already_streamed: true,
+            assistant_offset: prefix.length,
+            segment_id: 'stable-normalized',
+            text: 'hello   there'
+          }
+        ]
+      }
+    } as any)
+
+    expect(restored.filter(message => chatMessageText(message)).map(message => chatMessageText(message))).toEqual([
+      'ordinary answer',
+      'hello   there',
+      'remaining answer'
+    ])
+  })
+
+  it('does not re-project a stable interim row already present in the live transcript', () => {
+    const existing = msg('assistant-interim-stable-1', 'assistant', 'streamed checkpoint', { interim: true })
+
+    const restored = appendLiveSessionProjection([existing], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'streamed checkpointremaining answer',
+        streaming: true,
+        interim: [
+          {
+            segment_id: 'stable-1',
+            text: 'streamed checkpoint',
+            already_streamed: true,
+            assistant_offset: 'streamed checkpoint'.length
+          }
+        ]
+      }
+    } as any)
+
+    expect(restored.filter(message => message.id === 'assistant-interim-stable-1')).toHaveLength(1)
+    expect(restored.map(message => chatMessageText(message))).toEqual(['streamed checkpoint', 'remaining answer'])
+  })
+
+  it('restores same-offset interims and corrections in gateway arrival order', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-1',
+      inflight: {
+        assistant: 'draft',
+        streaming: true,
+        interim: [
+          {
+            already_streamed: false,
+            arrival_sequence: 0,
+            assistant_offset: 5,
+            segment_id: 'stable-1',
+            text: 'first commentary'
+          },
+          {
+            already_streamed: false,
+            arrival_sequence: 2,
+            assistant_offset: 5,
+            segment_id: 'stable-2',
+            text: 'second commentary'
+          }
+        ],
+        correction_entries: [{ arrival_sequence: 1, assistant_offset: 5, text: 'redirect' }]
+      }
+    } as any)
+
+    expect(restored.filter(message => chatMessageText(message)).map(message => [message.role, chatMessageText(message)])).toEqual([
+      ['assistant', 'draft'],
+      ['assistant', 'first commentary'],
+      ['user', 'redirect'],
+      ['assistant', 'second commentary']
+    ])
+  })
+
+  it('preserves unseen stable interim beside a structured current-turn assistant row', () => {
+    const stored = [
+      msg('stored-user', 'user', 'prompt'),
+      streamingMsg('assistant-stream-runtime-1', 'partial answer')
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      queued: null,
+      inflight: {
+        user: 'prompt',
+        assistant: 'partial answer',
+        streaming: true,
+        interim: [
+          {
+            already_streamed: false,
+            assistant_offset: 'partial answer'.length,
+            segment_id: 'structured-commentary',
+            text: 'tool commentary'
+          }
+        ]
+      }
+    })
+
+    expect(restored.filter(message => message.id === 'assistant-stream-runtime-1')).toHaveLength(1)
+    expect(restored.find(message => message.id === 'assistant-interim-structured-commentary')).toBeDefined()
+    expect(restored.map(message => chatMessageText(message))).toContain('tool commentary')
+  })
+
+  it('preserves stable interim alongside retained terminal error state', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-error',
+      queued: null,
+      inflight: {
+        user: 'prompt',
+        assistant: 'partial',
+        streaming: false,
+        error: 'backend failed',
+        interim: [
+          {
+            already_streamed: false,
+            assistant_offset: 7,
+            segment_id: 'error-commentary',
+            text: 'last checkpoint'
+          }
+        ]
+      }
+    })
+
+    expect(restored.find(message => message.id === 'assistant-interim-error-commentary')).toBeDefined()
+    expect(restored.find(message => message.id === 'assistant-stream-runtime-error')).toMatchObject({
+      error: 'backend failed'
+    })
+  })
+
+  it('keeps structured terminal-error hydration globally unique and fixed-point', () => {
+    const projection = {
+      session_id: 'runtime-structured-error',
+      queued: null,
+      inflight: {
+        user: 'prompt',
+        assistant: 'partial answer',
+        turn_id: 'turn-structured-error',
+        streaming: false,
+        error: 'backend failed',
+        interim: [
+          {
+            already_streamed: false,
+            assistant_offset: 'partial answer'.length,
+            segment_id: 'structured-error-commentary',
+            text: 'last checkpoint'
+          }
+        ]
+      }
+    }
+
+    const stored = [
+      msg('stored-user', 'user', 'prompt'),
+      {
+        ...streamingMsg('assistant-live-arbitrary-id', 'partial answer'),
+        liveTurnId: 'turn-structured-error'
+      }
+    ]
+
+    const once = appendLiveSessionProjection(stored, projection)
+    const twice = appendLiveSessionProjection(once, projection)
+    const ids = once.map(message => message.id)
+    const streamRows = once.filter(message => message.id === 'assistant-live-arbitrary-id')
+
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(streamRows).toHaveLength(1)
+    expect(streamRows[0]).toMatchObject({ error: 'backend failed', pending: false })
+    expect(streamRows[0].parts.some(part => part.type === 'tool-call')).toBe(true)
+    expect(once.find(message => message.id === 'assistant-interim-structured-error-commentary')).toBeDefined()
+    expect(twice).toEqual(once)
+  })
+
+  it('never carries structured parts across different turn IDs even when text looks like an extension', () => {
+    const previous = [
+      {
+        ...streamingMsg('assistant-old', 'same answer'),
+        liveTurnId: 'turn-old'
+      }
+    ]
+
+    const next = [
+      {
+        ...streamingMsg('assistant-new', 'same answer with more'),
+        liveTurnId: 'turn-new',
+        parts: [{ type: 'text' as const, text: 'same answer with more' }]
+      }
+    ]
+
+    const reconciled = reconcileResumeMessages(next, previous)
+
+    expect(reconciled[0].parts.some(part => part.type === 'tool-call')).toBe(false)
+    expect(chatMessageText(reconciled[0])).toBe('same answer with more')
+  })
+
+  it('rejects offsets that split a UTF-16 surrogate pair', () => {
+    const restored = appendLiveSessionProjection([], {
+      session_id: 'runtime-astral',
+      queued: null,
+      inflight: {
+        user: 'prompt',
+        assistant: 'A😀B',
+        streaming: true,
+        correction_entries: [{ assistant_offset: 2, text: 'redirect' }],
+        interim: [
+          {
+            already_streamed: false,
+            assistant_offset: 2,
+            segment_id: 'invalid-surrogate',
+            text: 'must not render'
+          }
+        ]
+      }
+    })
+
+    expect(restored.some(message => message.id === 'assistant-interim-invalid-surrogate')).toBe(false)
+    expect(restored.map(message => chatMessageText(message))).toContain('A😀B')
+  })
+
   // Corrections typed while a turn ran are their own user bubbles on the same
   // turn, ordered by ARRIVAL. Without boundary offsets (older gateway) the
   // whole dump precedes them — never the old prompt → corrections → reply
@@ -1349,7 +1738,13 @@ describe('appendLiveSessionProjection', () => {
   })
 
   it('does not re-project a correction the transcript already persisted', () => {
-    const stored = [msg('stored-user', 'user', 'remove the session counts'), msg('stored-fix', 'user', 'hurry up')]
+    const stored = [
+      msg('stored-user', 'user', 'remove the session counts', { liveTurnId: 'turn-current' }),
+      msg('user-inflight-correction-0-runtime-1', 'user', 'hurry up', {
+        liveTurnId: 'turn-current',
+        midTurnCorrection: true
+      })
+    ]
 
     const restored = appendLiveSessionProjection(stored, {
       session_id: 'runtime-1',
@@ -1357,13 +1752,14 @@ describe('appendLiveSessionProjection', () => {
         user: 'remove the session counts',
         corrections: ['hurry up'],
         assistant: 'Moving.',
-        streaming: true
+        streaming: true,
+        turn_id: 'turn-current'
       }
     })
 
     expect(restored.filter(message => message.role === 'user').map(message => message.id)).toEqual([
       'stored-user',
-      'stored-fix'
+      'user-inflight-correction-0-runtime-1'
     ])
   })
 
@@ -1373,7 +1769,8 @@ describe('appendLiveSessionProjection', () => {
     // been lifted into attachmentRefs and the visible text is the bare caption.
     const stored = [
       msg('stored-user', 'user', 'current running prompt', {
-        attachmentRefs: ['@image:/tmp/cat.png']
+        attachmentRefs: ['@image:/tmp/cat.png'],
+        liveTurnId: 'turn-current'
       }),
       msg('stored-assistant', 'assistant', 'earlier answer')
     ]
@@ -1383,7 +1780,8 @@ describe('appendLiveSessionProjection', () => {
       inflight: {
         user: 'current running prompt',
         assistant: 'partial answer',
-        streaming: true
+        streaming: true,
+        turn_id: 'turn-current'
       }
     })
 
@@ -1428,7 +1826,7 @@ describe('appendLiveSessionProjection', () => {
     const stored = [
       msg('stored-user-1', 'user', 'canceled prompt one'),
       msg('stored-user-2', 'user', 'canceled prompt two'),
-      msg('stored-user-3', 'user', 'current running prompt')
+      msg('stored-user-3', 'user', 'current running prompt', { liveTurnId: 'turn-current' })
     ]
 
     const restored = appendLiveSessionProjection(stored, {
@@ -1436,7 +1834,8 @@ describe('appendLiveSessionProjection', () => {
       inflight: {
         user: 'current running prompt',
         assistant: 'partial answer',
-        streaming: true
+        streaming: true,
+        turn_id: 'turn-current'
       }
     })
 
@@ -1524,6 +1923,43 @@ describe('appendLiveSessionProjection', () => {
       pending: true
     })
   })
+
+  it('is a fixed point for a complete hydrated live projection', () => {
+    const projection = {
+      session_id: 'runtime-1',
+      inflight: {
+        user: 'do the work',
+        assistant: 'ordinary prefixordinary tail',
+        streaming: true,
+        turn_id: 'turn-current',
+        interim: [
+          {
+            segment_id: 'runtime-1:interim:0',
+            text: 'commentary',
+            already_streamed: false,
+            assistant_offset: 15,
+            arrival_sequence: 0
+          }
+        ]
+      }
+    }
+
+    const once = appendLiveSessionProjection(
+      [msg('stored-user', 'user', 'do the work', { liveTurnId: 'turn-current' })],
+      projection
+    )
+
+    const twice = appendLiveSessionProjection(once, projection)
+
+    expect(twice).toEqual(once)
+    expect(new Set(twice.map(message => message.id)).size).toBe(twice.length)
+    expect(twice.map(message => chatMessageText(message))).toEqual([
+      'do the work',
+      'ordinary prefix',
+      'commentary',
+      'ordinary tail'
+    ])
+  })
 })
 
 describe('resolveResumedBusy', () => {
@@ -1552,7 +1988,7 @@ const runningProjection = (user: string): SessionResumeResponse =>
     message_count: 2,
     messages: [],
     running: true,
-    inflight: { user, assistant: 'partial answer', streaming: true }
+    inflight: { user, assistant: 'partial answer', streaming: true, turn_id: 'turn-current' }
   }) as SessionResumeResponse
 
 describe('dedupeInflightUserAgainstTranscript', () => {
@@ -1562,7 +1998,10 @@ describe('dedupeInflightUserAgainstTranscript', () => {
       msg('runtime-assistant', 'assistant', 'earlier answer', { timestamp: 2 })
     ]
 
-    const persisted = [...runtime, msg('persisted-current', 'user', 'current prompt', { timestamp: 3 })]
+    const persisted = [
+      ...runtime,
+      msg('persisted-current', 'user', 'current prompt', { timestamp: 3, liveTurnId: 'turn-current' })
+    ]
 
     const deduped = dedupeInflightUserAgainstTranscript(persisted, runtime, runningProjection('current prompt'))
 
@@ -1576,11 +2015,14 @@ describe('dedupeInflightUserAgainstTranscript', () => {
       msg('runtime-assistant', 'assistant', 'earlier answer', { timestamp: 2 })
     ]
 
-    const persisted = [...runtime, msg('persisted-current', 'user', 'current prompt', { timestamp: 3 })]
+    const persisted = [
+      ...runtime,
+      msg('persisted-current', 'user', 'current prompt', { timestamp: 3, liveTurnId: 'turn-current' })
+    ]
 
     const projection = {
       ...runningProjection('current prompt'),
-      inflight: { user: 'current prompt', assistant: '', streaming: false },
+      inflight: { user: 'current prompt', assistant: '', streaming: false, turn_id: 'turn-current' },
       queued: { user: 'queued prompt' }
     }
 
@@ -1632,20 +2074,29 @@ describe('removeRepresentedLocalLiveProjection', () => {
     const previous = [
       msg('user-old-optimistic', 'user', 'current prompt'),
       msg('assistant-complete', 'assistant', 'finished answer'),
-      msg('user-current', 'user', 'current prompt'),
-      msg('assistant-stream-current', 'assistant', 'partial answer', { pending: true }),
+      msg('user-current', 'user', 'current prompt', { liveTurnId: 'turn-current' }),
+      msg('assistant-stream-current', 'assistant', 'partial answer', {
+        liveTurnId: 'turn-current',
+        pending: true
+      }),
       msg('user-queued-runtime', 'user', 'queued prompt'),
       msg('user-racing', 'user', 'new racing prompt')
     ]
 
     const projection = {
       ...runningProjection('current prompt'),
+      inflight: { ...runningProjection('current prompt').inflight!, turn_id: 'turn-current' },
       queued: { user: 'queued prompt' }
     }
 
     const remaining = removeRepresentedLocalLiveProjection(previous, projection)
 
-    expect(remaining.map(message => message.id)).toEqual(['user-old-optimistic', 'assistant-complete', 'user-racing'])
+    expect(remaining.map(message => message.id)).toEqual([
+      'user-old-optimistic',
+      'assistant-complete',
+      'user-queued-runtime',
+      'user-racing'
+    ])
   })
 
   it('preserves an ambiguous text-identical local race prompt without a matching stream boundary', () => {
@@ -1654,7 +2105,10 @@ describe('removeRepresentedLocalLiveProjection', () => {
       msg('user-racing', 'user', 'repeat this')
     ]
 
-    const projection = runningProjection('repeat this')
+    const projection = {
+      ...runningProjection('repeat this'),
+      inflight: { ...runningProjection('repeat this').inflight!, turn_id: undefined }
+    }
 
     expect(removeRepresentedLocalLiveProjection(previous, projection)).toBe(previous)
   })
@@ -1662,13 +2116,17 @@ describe('removeRepresentedLocalLiveProjection', () => {
   it('does not consume a generic racing user as the activation-owned queued row', () => {
     const previous = [
       msg('runtime-assistant', 'assistant', 'finished answer'),
-      msg('user-current', 'user', 'current prompt'),
-      msg('assistant-stream-current', 'assistant', 'partial answer', { pending: true }),
+      msg('user-current', 'user', 'current prompt', { liveTurnId: 'turn-current' }),
+      msg('assistant-stream-current', 'assistant', 'partial answer', {
+        liveTurnId: 'turn-current',
+        pending: true
+      }),
       msg('user-racing', 'user', 'repeat this')
     ]
 
     const projection = {
       ...runningProjection('current prompt'),
+      inflight: { ...runningProjection('current prompt').inflight!, turn_id: 'turn-current' },
       queued: { user: 'repeat this' }
     }
 
@@ -1690,11 +2148,22 @@ describe('overlayConcurrentMessageChanges', () => {
   })
 
   it('replaces an activation stream placeholder and appends rows created after the baseline', () => {
-    const baseline = [msg('assistant-stream-runtime', 'assistant', 'partial A', { pending: true })]
-    const authoritative = [msg('assistant-stream-activation', 'assistant', 'partial A', { pending: true })]
+    const baseline = [
+      msg('assistant-stream-runtime', 'assistant', 'partial A', { liveTurnId: 'turn-current', pending: true })
+    ]
+
+    const authoritative = [
+      msg('assistant-stream-activation', 'assistant', 'partial A', {
+        liveTurnId: 'turn-current',
+        pending: true
+      })
+    ]
 
     const current = [
-      msg('assistant-stream-runtime', 'assistant', 'partial A + delta B', { pending: true }),
+      msg('assistant-stream-runtime', 'assistant', 'partial A + delta B', {
+        liveTurnId: 'turn-current',
+        pending: true
+      }),
       msg('user-racing', 'user', 'racing prompt')
     ]
 
@@ -1704,16 +2173,24 @@ describe('overlayConcurrentMessageChanges', () => {
     expect(overlaid[0].parts).toEqual([{ type: 'text', text: 'partial A + delta B' }])
   })
 
-  it('merges an activation prefix with a baseline-new runtime delta chunk', () => {
-    const authoritative = [msg('assistant-stream-activation', 'assistant', 'partial A', { pending: true })]
-    const current = [msg('assistant-stream-runtime', 'assistant', ' + delta B', { pending: true })]
+  it('replaces an activation row by stable turn identity without text-prefix grafting', () => {
+    const authoritative = [
+      msg('assistant-stream-activation', 'assistant', 'partial A', {
+        liveTurnId: 'turn-current',
+        pending: true
+      })
+    ]
+
+    const current = [
+      msg('assistant-stream-runtime', 'assistant', ' + delta B', {
+        liveTurnId: 'turn-current',
+        pending: true
+      })
+    ]
 
     const overlaid = overlayConcurrentMessageChanges(authoritative, [], current)
 
     expect(overlaid.map(message => message.id)).toEqual(['assistant-stream-runtime'])
-    expect(overlaid[0].parts).toEqual([
-      { type: 'text', text: 'partial A' },
-      { type: 'text', text: ' + delta B' }
-    ])
+    expect(overlaid[0].parts).toEqual([{ type: 'text', text: ' + delta B' }])
   })
 })

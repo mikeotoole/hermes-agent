@@ -120,13 +120,37 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         return state
       }
 
+      const acceptedTurnId = typeof payload?.turn_id === 'string' && payload.turn_id ? payload.turn_id : null
+      let messages = state.messages
+
+      if (acceptedTurnId) {
+        let optimisticUserIndex = -1
+
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const message = messages[index]
+
+          if (message.role === 'user' && message.id.startsWith('user-') && !message.liveTurnId) {
+            optimisticUserIndex = index
+            break
+          }
+        }
+
+        if (optimisticUserIndex >= 0) {
+          messages = messages.map((message, index) =>
+            index === optimisticUserIndex ? { ...message, liveTurnId: acceptedTurnId } : message
+          )
+        }
+      }
+
       return {
         ...state,
+        messages,
         busy: true,
         awaitingResponse: true,
         sawAssistantPayload: false,
         interrupted: false,
         interimBoundaryPending: false,
+        liveTurnId: acceptedTurnId,
         // Backend accepted the turn — the no-payload settle gate below may
         // now treat a running=false heartbeat as a real turn end.
         turnLive: true,
@@ -168,7 +192,13 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       const text = coerceGatewayText(payload?.text)
 
       if (text) {
-        finalizeInterimAssistantMessage(sessionId, text, occurredAt)
+        finalizeInterimAssistantMessage(
+          sessionId,
+          text,
+          typeof payload?.segment_id === 'string' ? payload.segment_id : undefined,
+          payload?.already_streamed !== false,
+          occurredAt
+        )
       }
     }
 

@@ -628,6 +628,15 @@ export interface SessionResumeResponse {
   hydrating?: boolean
   inflight?: null | {
     assistant?: string
+    /** Stable identity shared with message.start for this live turn. */
+    turn_id?: string
+    interim?: Array<{
+      already_streamed?: boolean
+      arrival_sequence?: number
+      assistant_offset?: number
+      segment_id?: string
+      text?: string
+    }>
     /** Mid-turn redirect corrections, oldest first. The turn's original prompt
      *  stays in `user`; these are the follow-ups typed while it ran. */
     corrections?: string[]
@@ -637,6 +646,11 @@ export interface SessionResumeResponse {
      *  and before the output it redirected (#73793). Omitted by older
      *  gateways. */
     correction_offsets?: number[]
+    correction_entries?: Array<{
+      arrival_sequence?: number
+      assistant_offset?: number
+      text?: string
+    }>
     /** Retained failed turn: the error the terminal frame carried (the frame
      *  itself may have been lost to a disconnect). */
     error?: string

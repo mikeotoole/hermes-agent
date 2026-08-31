@@ -24,7 +24,14 @@ import { $clarifyRequests, clearClarifyRequest, setClarifyRequest } from '@/stor
 import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
 import { $pinnedSessionIds } from '@/store/layout'
-import { $activeGatewayProfile, $newChatProfile, $newChatRoute, $profiles, ensureGatewayProfile } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $newChatProfile,
+  $newChatRoute,
+  $profiles,
+  ensureGatewayAgent,
+  ensureGatewayProfile
+} from '@/store/profile'
 import {
   $projectScope,
   $projectTree,
@@ -737,7 +744,12 @@ function ResumeHarness({
 }: {
   onStateUpdate?: (sessionId: string, state: ClientSessionState) => void
   onReady: (
-    resume: (storedSessionId: string, replaceRoute?: boolean, ownerRoute?: SessionProfileRoute) => Promise<unknown>
+    resume: (
+      storedSessionId: string,
+      replaceRoute?: boolean,
+      ownerRoute?: SessionProfileRoute,
+      isContinuationCurrent?: () => boolean
+    ) => Promise<unknown>
   ) => void
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   runtimeIdByStoredSessionIdRef?: MutableRefObject<Map<string, string>>
@@ -830,6 +842,13 @@ function ResumeTimerHarness({
 }
 
 describe('resumeSession failure recovery', () => {
+  beforeEach(() => {
+    vi.mocked(getSession).mockReset().mockResolvedValue(null as never)
+    vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined)
+    vi.mocked(ensureGatewayProfile).mockReset().mockResolvedValue(undefined)
+    setSessions([])
+  })
+
   afterEach(() => {
     cleanup()
     setActiveSessionId(null)
@@ -852,6 +871,50 @@ describe('resumeSession failure recovery', () => {
     await waitFor(() => expect(resume).not.toBeNull())
     await resume!('stored-1', true)
   }
+
+  it('does not route or dispatch when replay-gap ownership changes during session resolution', async () => {
+    const resolved = deferred<SessionInfo | null>()
+    const requestGateway = vi.fn(async () => ({} as never))
+    let current = true
+    let resume: Parameters<typeof ResumeHarness>[0]['onReady'] extends (value: infer T) => void ? T : never
+
+    vi.mocked(getSession).mockReturnValue(resolved.promise as never)
+    render(<ResumeHarness onReady={next => (resume = next)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(resume).toBeDefined())
+
+    const pending = resume!('stored-race', true, { connectionId: 'source-a', profile: 'default' }, () => current)
+    await waitFor(() => expect(getSession).toHaveBeenCalled())
+    current = false
+    resolved.resolve(storedSession({ id: 'stored-race', profile: 'default' }))
+    await pending
+
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch when replay-gap ownership changes during gateway routing', async () => {
+    const routed = deferred<void>()
+    const requestGateway = vi.fn(async () => ({} as never))
+    let current = true
+    let resume: Parameters<typeof ResumeHarness>[0]['onReady'] extends (value: infer T) => void ? T : never
+
+    vi.mocked(getSession).mockResolvedValue(storedSession({ id: 'stored-race', profile: 'default' }) as never)
+    vi.mocked(ensureGatewayAgent).mockReturnValue(routed.promise)
+    render(<ResumeHarness onReady={next => (resume = next)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(resume).toBeDefined())
+
+    const pending = resume!('stored-race', true, { connectionId: 'source-a', profile: 'default' }, () => current)
+    await waitFor(() => expect(ensureGatewayAgent).toHaveBeenCalled())
+    const activationOptions = vi.mocked(ensureGatewayAgent).mock.calls[0]?.[2]
+
+    expect(activationOptions?.beforeActivate?.()).toBe(true)
+    current = false
+    expect(activationOptions?.beforeActivate?.()).toBe(false)
+    routed.resolve()
+    await pending
+
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
 
   it.each([
     ['Codex tool-only', ''],
@@ -1160,7 +1223,8 @@ describe('resumeSession failure recovery', () => {
           inflight: {
             user: 'current prompt',
             assistant: 'partial A',
-            streaming: true
+            streaming: true,
+            turn_id: 'turn-cold'
           },
           info: {}
         } as never
@@ -1191,7 +1255,8 @@ describe('resumeSession failure recovery', () => {
       {
         id: 'assistant-stream-live-cold',
         role: 'assistant',
-        parts: [{ type: 'text', text: ' + delta B' }],
+        parts: [{ type: 'text', text: 'partial A + delta B' }],
+        liveTurnId: 'turn-cold',
         pending: true
       }
     ]
@@ -1368,6 +1433,7 @@ describe('resumeSession failure recovery', () => {
             fast: false,
             interimBoundaryPending: false,
             interrupted: false,
+            liveTurnId: null,
             messages: [],
             adoptedRunningTurn: false,
             model: '',
@@ -2870,7 +2936,8 @@ describe('resumeSession warm-cache mapping integrity', () => {
         id: 'cached-user',
         role: 'user',
         parts: [{ type: 'text', text: 'describe this image' }],
-        attachmentRefs: ['@image:/tmp/photo.png']
+        attachmentRefs: ['@image:/tmp/photo.png'],
+        timestamp: 1
       },
       {
         id: 'cached-assistant',
@@ -3242,12 +3309,14 @@ describe('resumeSession warm-cache mapping integrity', () => {
       {
         id: 'user-inflight-rt-A',
         role: 'user',
-        parts: [{ type: 'text', text: 'current prompt' }]
+        parts: [{ type: 'text', text: 'current prompt' }],
+        liveTurnId: 'turn-warm'
       },
       {
         id: 'assistant-stream-live-123',
         role: 'assistant',
         parts: [{ type: 'text', text: 'partial A' }],
+        liveTurnId: 'turn-warm',
         pending: true
       }
     ]
@@ -3277,7 +3346,8 @@ describe('resumeSession warm-cache mapping integrity', () => {
           inflight: {
             user: 'current prompt',
             assistant: 'partial A',
-            streaming: true
+            streaming: true,
+            turn_id: 'turn-warm'
           },
           info: {}
         } as never
@@ -3391,7 +3461,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
       { content: 'older prompt removed by compression', role: 'user', timestamp: -1 },
       { content: 'older answer removed by compression', role: 'assistant', timestamp: 0 },
       ...compressedRuntimeMessages,
-      { content: 'current prompt', role: 'user', timestamp: 3 }
+      { content: 'current prompt', role: 'user', timestamp: 3, turn_id: 'turn-current' }
     ]
 
     vi.mocked(getLatestSessionMessages).mockResolvedValue({
@@ -3411,7 +3481,8 @@ describe('resumeSession warm-cache mapping integrity', () => {
           inflight: {
             user: 'current prompt',
             assistant: 'partial answer',
-            streaming: true
+            streaming: true,
+            turn_id: 'turn-current'
           },
           info: {}
         } as never
@@ -3441,6 +3512,155 @@ describe('resumeSession warm-cache mapping integrity', () => {
 
     expect(currentPromptRows).toHaveLength(1)
     expect(JSON.stringify(resumedState?.messages)).toContain('partial answer')
+  })
+
+  it('preserves a repeated in-flight prompt when the legacy projection omits turn identity', async () => {
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+    const state = clientState('stored-A')
+    state.messages = [
+      {
+        id: 'stored-old',
+        role: 'user',
+        parts: [{ type: 'text', text: 'repeat prompt' }]
+      }
+    ]
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([['rt-A', state]])
+    }
+    const storedMessages = [{ content: 'repeat prompt', role: 'user', timestamp: 1 }]
+
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: storedMessages,
+      session_id: 'stored-A'
+    } as never)
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          session_id: 'rt-A',
+          session_key: 'stored-A',
+          resumed: 'stored-A',
+          message_count: storedMessages.length,
+          messages: storedMessages,
+          running: true,
+          inflight: {
+            user: 'repeat prompt',
+            assistant: '',
+            streaming: true
+          },
+          info: {}
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let resumedState: ClientSessionState | undefined
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+
+    render(
+      <ResumeHarness
+        onReady={ready => (resume = ready)}
+        onStateUpdate={(_sessionId, next) => (resumedState = next)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('stored-A', true)
+
+    const repeatedPromptRows = (resumedState?.messages ?? []).filter(
+      message => message.role === 'user' && JSON.stringify(message).includes('repeat prompt')
+    )
+
+    expect(repeatedPromptRows).toHaveLength(2)
+    expect(repeatedPromptRows.map(message => message.id)).toContain('user-inflight-rt-A')
+  })
+
+  it('does not assign a new gateway turn to an older unbound structured assistant during activation', async () => {
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+    const state = clientState('stored-A')
+    state.messages = [
+      {
+        id: 'assistant-stream-older',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'foreign reasoning' },
+          {
+            type: 'tool-call',
+            toolCallId: 'call-foreign',
+            toolName: 'read_file',
+            args: { path: '/older' },
+            argsText: '{"path":"/older"}'
+          },
+          { type: 'text', text: 'older cached answer' }
+        ],
+        pending: true
+      }
+    ]
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([['rt-A', state]])
+    }
+    const storedMessages = [
+      { content: 'new prompt', role: 'user', timestamp: 1, turn_id: 'turn-new' },
+      { content: 'new authoritative answer', role: 'assistant', timestamp: 2 }
+    ]
+
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: storedMessages,
+      session_id: 'stored-A'
+    } as never)
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          session_id: 'rt-A',
+          session_key: 'stored-A',
+          resumed: 'stored-A',
+          message_count: storedMessages.length,
+          messages: storedMessages,
+          running: true,
+          inflight: {
+            user: 'new prompt',
+            assistant: 'new authoritative answer',
+            streaming: true,
+            turn_id: 'turn-new'
+          },
+          info: {}
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let resumedState: ClientSessionState | undefined
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+
+    render(
+      <ResumeHarness
+        onReady={ready => (resume = ready)}
+        onStateUpdate={(_sessionId, next) => (resumedState = next)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('stored-A', true)
+
+    const messages = resumedState?.messages ?? []
+    const older = messages.find(message => JSON.stringify(message).includes('older cached answer'))
+    const current = messages.filter(message => JSON.stringify(message).includes('new authoritative answer'))
+
+    expect(older?.liveTurnId).toBeUndefined()
+    expect(older?.parts.map(part => part.type)).toEqual(['reasoning', 'tool-call', 'text'])
+    expect(current.length).toBeGreaterThan(0)
+    expect(current.every(message => message.parts.every(part => part.type === 'text'))).toBe(true)
   })
 
   it('keeps a warm runtime and optimistic turn on a transient activation timeout', async () => {

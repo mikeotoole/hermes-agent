@@ -622,7 +622,11 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
         class _FakeSupervisor:
             def submit_turn(self, frame, *, on_complete=None):
                 sid = frame["sid"]
-                server._emit("message.start", sid)
+                server._emit(
+                    "message.start",
+                    sid,
+                    {"turn_id": frame["turn_id"]},
+                )
                 server._emit("message.delta", sid, {"text": "hi"})
                 server._emit("message.complete", sid, {"text": "hi", "usage": usage, "status": "complete"})
                 server._emit("session.info", sid, dict(fixed_info))
@@ -659,7 +663,18 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
         finally:
             server._sessions.pop("sid", None)
 
-    assert run_flag_on() == run_flag_off()
+    def normalize_turn_id(events):
+        normalized = []
+        for event, sid, payload in events:
+            if event == "message.start":
+                assert isinstance(payload, dict)
+                assert isinstance(payload.get("turn_id"), str)
+                assert payload["turn_id"]
+                payload = {**payload, "turn_id": "<turn-id>"}
+            normalized.append((event, sid, payload))
+        return normalized
+
+    assert normalize_turn_id(run_flag_on()) == normalize_turn_id(run_flag_off())
 
 
 def test_session_context_explicit_cwd_for_ephemeral_task(monkeypatch, tmp_path):
@@ -15593,11 +15608,22 @@ def test_session_activate_returns_inflight_stream_before_completion(monkeypatch)
         )
 
         inflight = resp["result"].get("inflight")
-        assert inflight == {
+        assert isinstance(inflight, dict)
+        assert {
+            "assistant": inflight.get("assistant"),
+            "streaming": inflight.get("streaming"),
+            "user": inflight.get("user"),
+        } == {
             "assistant": "partial answer",
             "streaming": True,
             "user": "write a long answer",
         }
+        assert isinstance(inflight.get("turn_id"), str)
+        assert inflight["turn_id"]
+        assert (
+            inflight["turn_id"]
+            == server._sessions["sid-live"]["inflight_turn"]["turn_id"]
+        )
         turn_started_at = resp["result"]["turn_started_at"]
         assert turn_started_at == server._sessions["sid-live"]["inflight_turn"]["started_at"]
         assert turn_started_at > 0

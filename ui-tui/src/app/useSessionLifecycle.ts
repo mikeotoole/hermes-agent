@@ -61,14 +61,124 @@ export const liveSessionInflightMessages = (inflight?: null | SessionInflightTur
   return user ? [{ role: 'user', text: user }] : []
 }
 
-export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
-  const assistant = String(inflight?.assistant ?? '')
+interface SessionInterimBoundary {
+  already_streamed?: boolean
+  arrival_sequence?: number
+  assistant_offset?: number
+  segment_id?: string
+  text?: string
+}
 
-  if (!assistant && !inflight?.streaming) {
+interface SessionCorrectionBoundary {
+  arrival_sequence?: number
+  assistant_offset?: number
+  text?: string
+}
+
+interface SessionInflightWithInterim extends SessionInflightTurn {
+  correction_entries?: SessionCorrectionBoundary[]
+  interim?: SessionInterimBoundary[]
+}
+
+const isUtf16CodeUnitBoundary = (text: string, offset: number) => {
+  if (offset <= 0 || offset >= text.length) {
+    return true
+  }
+
+  const previous = text.charCodeAt(offset - 1)
+  const next = text.charCodeAt(offset)
+
+  return !(previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff)
+}
+
+export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightWithInterim) => {
+  const assistant = String(inflight?.assistant ?? '')
+  const interim = Array.isArray(inflight?.interim) ? inflight.interim : []
+  const corrections = Array.isArray(inflight?.correction_entries) ? inflight.correction_entries : []
+
+  if (!assistant && !inflight?.streaming && !interim.length && !corrections.length) {
     return
   }
 
-  turnController.hydrateStreamingText(assistant)
+  // The snapshot is authoritative for the complete live tail. Replace the
+  // prior hydration projection before rebuilding it so reconnect/activation
+  // replay is a fixed point instead of appending ordinary and correction rows.
+  turnController.resetHydratedInflight()
+
+  let cursor = 0
+
+  const timeline = [
+    ...interim.flatMap((boundary, index) => {
+      const text = String(boundary?.text ?? '')
+      const offset = boundary?.assistant_offset
+
+      return text.trim() &&
+        typeof offset === 'number' &&
+        Number.isInteger(offset) &&
+        offset >= 0 &&
+        offset <= assistant.length &&
+        isUtf16CodeUnitBoundary(assistant, offset)
+        ? [{ boundary, index, kind: 'interim' as const, offset, sequence: boundary.arrival_sequence }]
+        : []
+    }),
+    ...corrections.flatMap((boundary, index) => {
+      const text = String(boundary?.text ?? '').trim()
+      const offset = boundary?.assistant_offset
+
+      return text &&
+        typeof offset === 'number' &&
+        Number.isInteger(offset) &&
+        offset >= 0 &&
+        offset <= assistant.length &&
+        isUtf16CodeUnitBoundary(assistant, offset)
+        ? [{ boundary: { ...boundary, text }, index, kind: 'correction' as const, offset, sequence: boundary.arrival_sequence }]
+        : []
+    })
+  ].sort((a, b) => {
+    if (a.offset !== b.offset) {
+      return a.offset - b.offset
+    }
+
+    const aSequence = typeof a.sequence === 'number' && Number.isInteger(a.sequence) ? a.sequence : null
+    const bSequence = typeof b.sequence === 'number' && Number.isInteger(b.sequence) ? b.sequence : null
+
+    if (aSequence !== null && bSequence !== null && aSequence !== bSequence) {
+      return aSequence - bSequence
+    }
+
+    return a.kind === b.kind ? a.index - b.index : a.kind === 'interim' ? -1 : 1
+  })
+
+  for (const item of timeline) {
+    const offset = Math.max(item.offset, cursor)
+
+    const interimStart =
+      item.kind === 'interim' && item.boundary.already_streamed
+        ? Math.max(cursor, offset - String(item.boundary.text ?? '').length)
+        : offset
+
+    if (interimStart > cursor) {
+      turnController.hydrateStreamingText(assistant.slice(cursor, interimStart))
+    }
+
+    if (item.kind === 'correction') {
+      turnController.recordCorrectionMessage(item.boundary.text ?? '')
+    } else {
+      if (interimStart > cursor) {
+        turnController.flushStreamingSegment()
+      }
+
+      turnController.recordInterimMessage(
+        item.boundary.text ?? '',
+        item.boundary.segment_id,
+        false
+      )
+    }
+
+    cursor = offset
+  }
+
+  turnController.hydrateStreamingText(assistant.slice(cursor))
 }
 
 export const signalFreshSessionBoundary = (

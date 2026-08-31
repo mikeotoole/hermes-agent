@@ -14,11 +14,12 @@ let stream: MessageStreamHarness
 let mockCompleteSound: ReturnType<typeof vi.fn>
 let mockHaptic: ReturnType<typeof vi.fn>
 
-function mountStream() {
-  stream = renderMessageStream(SID)
+function mountStream(options: Parameters<typeof renderMessageStream>[1] = {}) {
+  stream = renderMessageStream(SID, options)
 }
 
-const start = () => act(() => stream.handleEvent({ payload: {}, session_id: SID, type: 'message.start' }))
+const start = (turnId = 'turn-default') =>
+  act(() => stream.handleEvent({ payload: { turn_id: turnId }, session_id: SID, type: 'message.start' }))
 
 const delta = (text: string) =>
   act(() => stream.handleEvent({ payload: { text }, session_id: SID, type: 'message.delta' }))
@@ -97,6 +98,40 @@ describe('useMessageStream interim text sealing', () => {
     expect(byText('All done.')?.interim).toBeFalsy()
   })
 
+  it('does not duplicate a stable interim frame delivered twice by replay', async () => {
+    mountStream()
+    await start()
+    await delta('Let me inspect it.')
+
+    const frame = {
+      payload: { text: 'Let me inspect it.', already_streamed: true, segment_id: 'stable-1' },
+      session_id: SID,
+      type: 'message.interim'
+    } as RpcEvent
+
+    await act(() => stream.handleEvent(frame))
+    await act(() => stream.handleEvent(frame))
+
+    expect(assistantMessages().filter(text => text === 'Let me inspect it.')).toHaveLength(1)
+  })
+
+  it('treats a legacy interim without already_streamed as already streamed', async () => {
+    mountStream()
+    await start()
+    await delta('legacy commentary')
+    await act(() =>
+      stream.handleEvent({
+        payload: { text: 'legacy commentary' },
+        session_id: SID,
+        type: 'message.interim'
+      } as RpcEvent)
+    )
+
+    expect(assistantMessages()).toEqual(['legacy commentary'])
+    expect(getState().messages.find(message => chatMessageText(message) === 'legacy commentary')?.interim).toBe(true)
+  })
+
+
   it('clears the interim mark when a previewed final settles onto the interim bubble', async () => {
     mountStream()
     await start()
@@ -154,35 +189,35 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(true)
   })
 
-  it('settles an identical final onto a non-previewed interim (tool-call turn) instead of duplicating (#63679)', async () => {
-    mountStream()
+  it('hydrates an ambiguous identical non-previewed completion instead of inferring segment identity (#63679)', async () => {
+    const hydrateFromStoredSession = vi.fn(async () => undefined)
+    mountStream({ hydrateFromStoredSession })
     await start()
 
     // A plain tool-call turn: the streamed text is sealed as an interim at the
     // tool boundary (no response_previewed — that flag is only for verify-on-
-    // stop). The final completion is the SAME turn's reply. It must settle onto
-    // the interim, not append a second bubble — the DB has one row. This is the
-    // "renders twice" bug: partial streamed copy + clean final copy side by side.
+    // stop). Exact text cannot prove segment identity, so keep both local rows
+    // until canonical stored history resolves whether the DB has one or two.
     await interim('same reply')
     await complete('same reply')
 
-    const texts = assistantMessages()
-    expect(texts.filter(t => t === 'same reply')).toHaveLength(1)
+    expect(assistantMessages().filter(t => t === 'same reply')).toHaveLength(2)
+    expect(hydrateFromStoredSession).toHaveBeenCalledOnce()
   })
 
-  it('settles a prefix-extended final onto a non-previewed interim (streamed + trailing delta)', async () => {
-    mountStream()
+  it('hydrates an ambiguous prefix-related non-previewed completion', async () => {
+    const hydrateFromStoredSession = vi.fn(async () => undefined)
+    mountStream({ hydrateFromStoredSession })
     await start()
 
     // The stream dropped/settled early at the tool boundary; the final adds a
-    // trailing delta. Same turn — one bubble with the full final text.
+    // trailing delta. Prefix continuity is presentation, not segment identity.
     await delta('partial')
     await interim('partial')
     await complete('partial answer continued')
 
-    const texts = assistantMessages()
-    expect(texts.filter(t => t.includes('partial'))).toHaveLength(1)
-    expect(texts[0]).toBe('partial answer continued')
+    expect(assistantMessages()).toEqual(['partial', 'partial answer continued'])
+    expect(hydrateFromStoredSession).toHaveBeenCalledOnce()
   })
 
   it('settles final onto interim even after message.start reset the boundary flag (#74560)', async () => {
@@ -195,11 +230,23 @@ describe('useMessageStream interim text sealing', () => {
     // The continuation must still settle onto the interim — not append a
     // duplicate bubble. Regression for #74560.
     await start()
-    await complete('partial answer continued')
+    await completePreviewed('partial answer continued')
 
     const texts = assistantMessages()
     expect(texts.filter(t => t.includes('partial'))).toHaveLength(1)
     expect(texts[0]).toBe('partial answer continued')
+  })
+
+  it('does not settle prefix-related completion onto an interim from a different live turn', async () => {
+    mountStream()
+    await start('turn-a')
+    await delta('partial')
+    await interim('partial')
+
+    await start('turn-b')
+    await complete('partial answer from a new turn')
+
+    expect(assistantMessages()).toEqual(['partial', 'partial answer from a new turn'])
   })
 
   it('appends a distinct previewed final after a message.start reset instead of overwriting the interim', async () => {
@@ -315,5 +362,23 @@ describe('useMessageStream interim text sealing', () => {
     // New turn starts
     await start()
     expect(getState().interimBoundaryPending).toBe(false)
+  })
+
+  it('binds the trailing optimistic user row to the accepted live turn', async () => {
+    mountStream()
+    stream.states.set(SID, {
+      ...getState(),
+      messages: [
+        {
+          id: 'user-optimistic',
+          role: 'user',
+          parts: [{ type: 'text', text: 'accepted prompt' }]
+        }
+      ]
+    })
+
+    await start('turn-accepted')
+
+    expect(getState().messages[0].liveTurnId).toBe('turn-accepted')
   })
 })

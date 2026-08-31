@@ -88,7 +88,6 @@ import { requestComposerInsert } from '../chat/composer/focus'
 import { useComposerActions } from '../chat/hooks/use-composer-actions'
 import { CommandPalette } from '../command-palette'
 import { triggerAndRefreshCronJobs } from '../cron/cron-actions'
-import { useGatewayBoot } from '../gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from '../gateway/hooks/use-gateway-request'
 import { useKeybinds } from '../hooks/use-keybinds'
 import { useHudHandoff } from '../hud/handoff'
@@ -142,6 +141,7 @@ import {
   resolveActiveTranscriptSession,
   useBackgroundSync
 } from './hooks/use-background-sync'
+import { useContribGatewayBoot } from './hooks/use-contrib-gateway-boot'
 import { useDesktopIntegrations } from './hooks/use-desktop-integrations'
 import { usePetBridge } from './hooks/use-pet-bridge'
 import { useQuickEntryBridge } from './hooks/use-quick-entry-bridge'
@@ -778,13 +778,15 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     [handleDesktopGatewayEvent, startFreshSessionDraft]
   )
 
-  useGatewayBoot({
+  useContribGatewayBoot({
     beforeConnectionSwitch: () => {
       startFreshSessionDraft({ preserveRoute: true, workspaceTarget: null })
       resetOverlayReturnRoute()
       resetProjectTreeState()
       closeAllTerminals()
     },
+    getActiveRuntimeId: () => activeSessionIdRef.current,
+    getSelectedStoredSessionId: () => selectedStoredSessionIdRef.current,
     handleGatewayEvent: handleGatewayEventWithPlugins,
     onConnectionReady: c => {
       connectionRef.current = c
@@ -793,7 +795,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       gatewayRef.current = g
     },
     refreshHermesConfig,
-    refreshSessions
+    refreshSessions,
+    resumeSession
   })
 
   useEffect(() => {

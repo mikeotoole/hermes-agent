@@ -186,6 +186,8 @@ export interface ClientSessionState {
   busy: boolean
   awaitingResponse: boolean
   streamId: string | null
+  /** Stable gateway identity for the live turn; null for legacy gateways/idle sessions. */
+  liveTurnId: string | null
   sawAssistantPayload: boolean
   /** This window picked up a turn it did not start — it resumed onto a session
    *  that was already running somewhere else (leaving HUD mode, opening a

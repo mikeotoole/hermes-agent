@@ -23,6 +23,7 @@ describe('reconcileResumeMessages — structural parts on a mid-turn switch', ()
       user('u1', 'read the config'),
       {
         id: 'a1',
+        liveTurnId: 'turn-1',
         parts: [
           { type: 'reasoning', text: 'I should read the file first.' },
           { type: 'tool-call', toolCallId: 'call-1', toolName: 'read_file', result: 'contents' },
@@ -36,7 +37,12 @@ describe('reconcileResumeMessages — structural parts on a mid-turn switch', ()
     // one delta further along, so the text no longer matches the cached copy.
     const authoritative: ChatMessage[] = [
       user('u1', 'read the config'),
-      { id: 'a1', parts: [{ type: 'text', text: 'Reading it now — found the key' }], role: 'assistant' }
+      {
+        id: 'a1',
+        liveTurnId: 'turn-1',
+        parts: [{ type: 'text', text: 'Reading it now — found the key' }],
+        role: 'assistant'
+      }
     ]
 
     const [, assistant] = reconcileResumeMessages(authoritative, cached)
@@ -74,12 +80,13 @@ describe('reconcileResumeMessages — structural parts on a mid-turn switch', ()
     expect(assistant.parts.filter(p => p.type === 'tool-call')).toHaveLength(1)
   })
 
-  it('keeps live-tail structure when the flat dump is not a strict text extension', () => {
+  it('keeps live-tail structure by turn identity while authoritative text wins', () => {
     // Mid-turn sandwich path: cache holds reasoning/tools; resume returns a
     // longer non-extending dump. Structure source must be live-tail.
     const cached: ChatMessage[] = [
       {
         id: 'assistant-stream-1',
+        liveTurnId: 'turn-2',
         pending: true,
         parts: [
           { type: 'reasoning', text: 'thinking about tools' },
@@ -93,6 +100,7 @@ describe('reconcileResumeMessages — structural parts on a mid-turn switch', ()
     const authoritative: ChatMessage[] = [
       {
         id: 'assistant-stream-1',
+        liveTurnId: 'turn-2',
         pending: true,
         parts: [{ type: 'text', text: 'thinking about tools\nRan terminal\npartial and more dump' }],
         role: 'assistant'
@@ -103,9 +111,9 @@ describe('reconcileResumeMessages — structural parts on a mid-turn switch', ()
 
     expect(assistant.parts.some(part => part.type === 'reasoning')).toBe(true)
     expect(assistant.parts.some(part => part.type === 'tool-call')).toBe(true)
-    expect(assistant.parts.filter(part => part.type === 'text').map(part => ('text' in part ? part.text : ''))).toEqual(
-      ['partial']
-    )
+    expect(assistant.parts.filter(part => part.type === 'text').map(part => ('text' in part ? part.text : ''))).toEqual([
+      'thinking about tools\nRan terminal\npartial and more dump'
+    ])
   })
 
   it('does not graft historical structure onto a live text-only row after compression rewrote ordinals', () => {

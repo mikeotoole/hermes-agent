@@ -467,7 +467,11 @@ class ComputeHost:
                 session["running"] = True
                 session["_turn_cancel_requested"] = False
                 session["last_active"] = time.time()
-                server._start_inflight_turn(session, frame.get("text") if "text" in frame else frame.get("prompt"))
+                server._start_inflight_turn(
+                    session,
+                    frame.get("text") if "text" in frame else frame.get("prompt"),
+                    turn_id=frame.get("turn_id"),
+                )
             self.emit({"type": "turn.started", "sid": sid, "request_id": request_id, "started_ns": now_ns()})
             try:
                 server._ensure_session_db_row(session)

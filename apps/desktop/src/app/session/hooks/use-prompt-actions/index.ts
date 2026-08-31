@@ -317,7 +317,7 @@ export function usePromptActions({
           // never spliced above it (#73793) or mid-thread via the old
           // last-assistant fallback (#83151).
           if (options.appendAfterActiveReply) {
-            return appendMidTurnUserMessage(state, message)
+            return appendMidTurnUserMessage(state, { ...message, midTurnCorrection: true })
           }
 
           return { ...state, messages: [...state.messages, message] }

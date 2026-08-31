@@ -2349,6 +2349,12 @@ def _compute_host_turn_frame(
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
+        inflight = session.get("inflight_turn")
+        turn_id = (
+            str(inflight.get("turn_id") or "")
+            if isinstance(inflight, dict)
+            else ""
+        )
         attached_images = (
             list(image_paths)
             if image_paths is not None
@@ -2358,6 +2364,7 @@ def _compute_host_turn_frame(
         "type": "turn.start",
         "sid": sid,
         "request_id": rid,
+        "turn_id": turn_id,
         "session_key": session.get("session_key") or sid,
         "text": text,
         **({"display_kind": display_kind} if display_kind else {}),
@@ -7459,6 +7466,46 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _utf16_code_units(text: str) -> int:
+    """Return the string length used by JavaScript slice offsets."""
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _next_inflight_arrival_sequence(turn: dict[str, Any]) -> int:
+    raw_sequence = turn.get("arrival_sequence")
+    sequence = raw_sequence if isinstance(raw_sequence, int) and raw_sequence >= 0 else 0
+    turn["arrival_sequence"] = sequence + 1
+    return sequence
+
+
+def _on_interim_assistant(
+    sid: str, text: Any, *, already_streamed: bool = False
+) -> None:
+    payload = {
+        "already_streamed": bool(already_streamed),
+        "segment_id": uuid.uuid4().hex,
+        "text": str(text),
+    }
+    session = _sessions.get(sid)
+    if session is not None:
+        lock = session.get("history_lock")
+        if lock is not None:
+            with lock:
+                turn = session.get("inflight_turn")
+                if isinstance(turn, dict):
+                    assistant_text = str(turn.get("assistant") or "")
+                    boundary = dict(payload)
+                    boundary["arrival_sequence"] = _next_inflight_arrival_sequence(turn)
+                    boundary["assistant_offset"] = _utf16_code_units(assistant_text)
+                    interim = turn.get("interim")
+                    if not isinstance(interim, list):
+                        interim = []
+                        turn["interim"] = interim
+                    interim.append(boundary)
+                    turn["updated_at"] = time.time()
+    _emit("message.interim", sid, payload)
+
+
 def _agent_cbs(sid: str) -> dict:
     callbacks = {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -7573,10 +7620,8 @@ def _agent_cbs(sid: str) -> dict:
     # this, and the finally block clears it so a stale closure can't fire.
     if _load_interim_assistant_messages():
         callbacks["interim_assistant_callback"] = (
-            lambda text, *, already_streamed=False: _emit(
-                "message.interim",
-                sid,
-                {"text": str(text), "already_streamed": bool(already_streamed)},
+            lambda text, *, already_streamed=False: _on_interim_assistant(
+                sid, text, already_streamed=already_streamed
             )
         )
 
@@ -8990,12 +9035,15 @@ def _inflight_text(value: Any) -> str:
     return _content_display_text(value).strip()
 
 
-def _start_inflight_turn(session: dict, text: Any) -> None:
+def _start_inflight_turn(
+    session: dict, text: Any, *, turn_id: str | None = None
+) -> None:
     now = time.time()
     session["inflight_turn"] = {
         "assistant": "",
         "started_at": now,
         "streaming": True,
+        "turn_id": str(turn_id or "").strip() or uuid.uuid4().hex,
         "updated_at": now,
         "user": _inflight_text(text),
     }
@@ -9007,7 +9055,12 @@ def _append_inflight_delta(session: dict, delta: Any) -> None:
         return
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
-        turn = {"assistant": "", "streaming": True, "user": ""}
+        turn = {
+            "assistant": "",
+            "streaming": True,
+            "turn_id": uuid.uuid4().hex,
+            "user": "",
+        }
     turn["assistant"] = f"{turn.get('assistant') or ''}{text}"
     turn["streaming"] = True
     turn["updated_at"] = time.time()
@@ -9037,9 +9090,20 @@ def _record_inflight_correction(session: dict, text: Any) -> None:
     # when this correction was accepted. Resuming clients use it to place the
     # correction bubble AFTER the output the user had already seen and BEFORE
     # the output it redirected (#73793) instead of above the whole reply.
+    assistant_offset = _utf16_code_units(str(turn.get("assistant") or ""))
+    arrival_sequence = _next_inflight_arrival_sequence(turn)
     offsets = list(turn.get("correction_offsets") or [])
-    offsets.append(len(str(turn.get("assistant") or "")))
+    offsets.append(assistant_offset)
     turn["correction_offsets"] = offsets
+    entries = list(turn.get("correction_entries") or [])
+    entries.append(
+        {
+            "arrival_sequence": arrival_sequence,
+            "assistant_offset": assistant_offset,
+            "text": text,
+        }
+    )
+    turn["correction_entries"] = entries
     turn["updated_at"] = time.time()
     session["inflight_turn"] = turn
 
@@ -9068,7 +9132,12 @@ def _fail_inflight_turn(
     now = time.time()
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
-        turn = {"assistant": "", "user": "", "started_at": now}
+        turn = {
+            "assistant": "",
+            "user": "",
+            "started_at": now,
+            "turn_id": uuid.uuid4().hex,
+        }
     turn["assistant"] = str(turn.get("assistant") or "")
     turn["user"] = str(turn.get("user") or "")
     turn["error"] = message or "turn failed"
@@ -9609,13 +9678,47 @@ def _inflight_snapshot(session: dict) -> dict | None:
     assistant = str(turn.get("assistant") or "")
     streaming = bool(turn.get("streaming"))
     error = str(turn.get("error") or "").strip()
-    if not user and not assistant and not streaming and not error:
+    raw_interim = turn.get("interim")
+    if not isinstance(raw_interim, list):
+        raw_interim = []
+    interim = []
+    for raw in raw_interim:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get("segment_id") or "").strip()
+        text = str(raw.get("text") or "")
+        if not segment_id or not text:
+            continue
+        boundary = {
+            "already_streamed": bool(raw.get("already_streamed")),
+            "segment_id": segment_id,
+            "text": text,
+        }
+        assistant_offset = raw.get("assistant_offset")
+        if (
+            isinstance(assistant_offset, int)
+            and not isinstance(assistant_offset, bool)
+            and assistant_offset >= 0
+        ):
+            boundary["assistant_offset"] = assistant_offset
+        arrival_sequence = raw.get("arrival_sequence")
+        if (
+            isinstance(arrival_sequence, int)
+            and not isinstance(arrival_sequence, bool)
+            and arrival_sequence >= 0
+        ):
+            boundary["arrival_sequence"] = arrival_sequence
+        interim.append(boundary)
+    if not user and not assistant and not streaming and not error and not interim:
         return None
     snapshot = {
         "assistant": assistant,
         "streaming": streaming,
         "user": user,
     }
+    turn_id = str(turn.get("turn_id") or "").strip()
+    if turn_id:
+        snapshot["turn_id"] = turn_id
     raw_corrections = turn.get("corrections") or []
     raw_offsets = turn.get("correction_offsets") or []
     correction_pairs = [
@@ -9633,6 +9736,34 @@ def _inflight_snapshot(session: dict) -> dict | None:
         # clients fall back to placing corrections after the assistant dump.
         if all(isinstance(offset, int) and offset >= 0 for _, offset in correction_pairs):
             snapshot["correction_offsets"] = [int(offset) for _, offset in correction_pairs]  # type: ignore[arg-type]
+    if interim:
+        snapshot["interim"] = interim
+
+    correction_entries = []
+    for item in turn.get("correction_entries") or []:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        offset = item.get("assistant_offset")
+        sequence = item.get("arrival_sequence")
+        if (
+            isinstance(text, str)
+            and text.strip()
+            and isinstance(offset, int)
+            and offset >= 0
+            and isinstance(sequence, int)
+            and sequence >= 0
+        ):
+            correction_entries.append(
+                {
+                    "arrival_sequence": sequence,
+                    "assistant_offset": offset,
+                    "text": text,
+                }
+            )
+
+    if correction_entries:
+        snapshot["correction_entries"] = correction_entries
     if error:
         # Retained failed turn (see _fail_inflight_turn): carry the error
         # semantics so a resuming client can rebuild the failed-turn bubble
@@ -11985,7 +12116,11 @@ def _run_prompt_submit(
         len(text) if isinstance(text, str) else "-",
         len(images),
     )
-    _emit("message.start", sid)
+    _emit(
+        "message.start",
+        sid,
+        {"turn_id": str((session.get("inflight_turn") or {}).get("turn_id") or "")},
+    )
 
     def run():
         # The conversation runs on a fresh thread, so ContextVars from the RPC
@@ -12241,10 +12376,9 @@ def _run_prompt_submit(
             # Gated on display.interim_assistant_messages (default true).
             if _load_interim_assistant_messages():
                 def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-                    _emit("message.interim", sid, {
-                        "text": text,
-                        "already_streamed": already_streamed,
-                    })
+                    _on_interim_assistant(
+                        sid, text, already_streamed=already_streamed
+                    )
 
                 agent.interim_assistant_callback = _interim_assistant_cb
             else:

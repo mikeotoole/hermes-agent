@@ -80,6 +80,38 @@ describe('ensureGatewayForProfile under a shared global remote', () => {
     expect($gateway.get()).toBe(primary)
   })
 
+  it('does not publish a shared-primary route after continuation ownership is revoked', async () => {
+    let resolveDescriptor!: (value: {
+      port: number
+      profile: string
+      sharedPrimary: boolean
+      token: string
+    }) => void
+
+    let current = true
+
+    const descriptor = new Promise<{
+      port: number
+      profile: string
+      sharedPrimary: boolean
+      token: string
+    }>(resolve => {
+      resolveDescriptor = resolve
+    })
+
+    setPrimaryGateway(makePrimary() as never, 'default')
+    installDesktop({ getConnection: vi.fn(() => descriptor) })
+
+    const activation = ensureGatewayForProfile('venture', { beforeActivate: () => current })
+
+    current = false
+    resolveDescriptor({ port: 4242, profile: 'venture', sharedPrimary: true, token: 't' })
+
+    await expect(activation).resolves.toBe(false)
+    expect(gatewayMocks.setConnection).not.toHaveBeenCalled()
+    expect(gatewayMocks.connect).not.toHaveBeenCalled()
+  })
+
   it('dials the exact WebSocket URL for a pooled profile descriptor that carries profile', async () => {
     const primary = makePrimary()
     const remoteWsUrl = 'wss://remote.invalid/api/ws?token=fake-test-token'

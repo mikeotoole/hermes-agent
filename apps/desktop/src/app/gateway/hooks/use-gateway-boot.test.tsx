@@ -244,16 +244,19 @@ function fakeDesktop() {
 
 function Harness({
   beforeConnectionSwitch = () => undefined,
+  handleReplayGap = () => undefined,
   refreshHermesConfig = async () => undefined,
   refreshSessions
 }: {
   beforeConnectionSwitch?: () => void
+  handleReplayGap?: () => void
   refreshHermesConfig?: (force?: boolean, shouldPublish?: () => boolean) => Promise<void>
   refreshSessions?: (shouldPublish?: () => boolean) => Promise<void>
 } = {}) {
   useGatewayBoot({
     beforeConnectionSwitch,
     handleGatewayEvent: () => undefined,
+    handleReplayGap,
     onConnectionReady: () => undefined,
     onGatewayReady: () => undefined,
     refreshHermesConfig,

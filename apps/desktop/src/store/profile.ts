@@ -461,7 +461,10 @@ async function resolveConnectionForProfile(profile: string): Promise<HermesConne
 // their sockets — so their sessions keep streaming concurrently. A null/empty
 // target means "no explicit profile" → keep the current gateway (a plain new
 // chat stays put; single-profile users never leave the primary).
-export async function ensureGatewayProfile(profile: string | null | undefined): Promise<void> {
+export async function ensureGatewayProfile(
+  profile: string | null | undefined,
+  { beforeActivate, signal }: EnsureGatewayAgentOptions = {}
+): Promise<void> {
   if (profile == null || !String(profile).trim()) {
     // "No explicit profile" = use the current gateway. But if an explicit swap
     // (e.g. the user just picked a profile in the switcher) is still in flight,
@@ -488,6 +491,10 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
     await gatewaySwitch.catch(() => undefined)
   }
 
+  if (signal?.aborted || (beforeActivate && !beforeActivate())) {
+    return
+  }
+
   if (normalizeProfileKey($activeGatewayProfile.get()) === target && $gateway.get()) {
     return
   }
@@ -501,7 +508,16 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
     // syncConnectionToActiveProfile await left a window where $gateway
     // already targeted the new backend while $connection still described the
     // previous one, and remote-aware paths announced the wrong mode (#46651).
-    const [connection] = await Promise.all([resolveConnectionForProfile(target), ensureGatewayForProfile(target)])
+    const activation =
+      beforeActivate || signal
+        ? ensureGatewayForProfile(target, { beforeActivate, signal })
+        : ensureGatewayForProfile(target)
+
+    const [connection, activated] = await Promise.all([resolveConnectionForProfile(target), activation])
+
+    if (activated === false || signal?.aborted || (beforeActivate && !beforeActivate())) {
+      return
+    }
 
     // ONE publication frame. batch() defers Nanostores' notifications to the
     // end of the callback, so the profile pointer and the connection
@@ -643,7 +659,9 @@ export async function ensureGatewayAgent(
   const connection = (connectionId ?? '').trim() || null
 
   if (!connection) {
-    return ensureGatewayProfile(target)
+    return beforeActivate || signal
+      ? ensureGatewayProfile(target, { beforeActivate, signal })
+      : ensureGatewayProfile(target)
   }
 
   // Serialize against any in-flight profile/agent switch (shared mutex). A
@@ -671,9 +689,10 @@ export async function ensureGatewayAgent(
 
     // Descriptor resolves concurrently with the dial, same as the profile
     // path, so no await sits between the activation and the publication.
-    const activation = signal
-      ? ensureGatewayForAgent(connection, target, { signal })
-      : ensureGatewayForAgent(connection, target)
+    const activation =
+      beforeActivate || signal
+        ? ensureGatewayForAgent(connection, target, { beforeActivate, signal })
+        : ensureGatewayForAgent(connection, target)
 
     const [descriptor, activated] = await Promise.all([resolveConnectionForAgent(connection, target), activation])
 
