@@ -56,8 +56,6 @@ const endGatewaySwitch = vi.fn((token?: number) => {
   }
 })
 
-const isCurrentGatewaySwitch = vi.fn((token: number) => token === latestSwitchToken)
-
 const recoverActiveSourceAfterFailedGatewaySwitch = vi.fn()
 
 vi.mock('@/store/session', () => ({ $connection }))
@@ -65,7 +63,6 @@ vi.mock('@/store/gateway-switch', () => ({
   $gatewaySwitching,
   beginGatewaySwitch,
   endGatewaySwitch,
-  isCurrentGatewaySwitch,
   recoverActiveSourceAfterFailedGatewaySwitch,
   wipeSessionListsForGatewaySwitch
 }))
@@ -107,7 +104,6 @@ const list = vi.fn(async () => registry)
 const setLastUsed = vi.fn(async (id: string) => ({ ok: true, registry: { ...registry, lastUsed: id } }))
 
 beforeEach(() => {
-  latestSwitchToken = 0
   localStorage.clear()
   _resetConnectionsForTests()
   $connectionsRegistry.set(null)

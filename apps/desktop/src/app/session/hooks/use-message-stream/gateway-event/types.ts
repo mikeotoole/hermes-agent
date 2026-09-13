@@ -23,13 +23,7 @@ export interface GatewayEventDeps {
   ) => void
   failAssistantMessage: (sessionId: string, errorMessage: string, occurredAt?: number) => void
   flushQueuedDeltas: (sessionId?: string) => void
-  finalizeInterimAssistantMessage: (
-    sessionId: string,
-    text: string,
-    segmentId?: string,
-    alreadyStreamed?: boolean,
-    occurredAt?: number
-  ) => void
+  finalizeInterimAssistantMessage: (sessionId: string, text: string, occurredAt?: number) => void
   hydrateFromStoredSession: (
     attempts?: number,
     storedSessionId?: string | null,

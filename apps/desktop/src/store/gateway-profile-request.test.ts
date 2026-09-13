@@ -4,8 +4,6 @@ const secondaryGateways: Array<{
   close: ReturnType<typeof vi.fn>
   connect: ReturnType<typeof vi.fn>
   connectionState: string
-  emitReplayGap: (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void
-  onReplayGap: ReturnType<typeof vi.fn>
   request: ReturnType<typeof vi.fn>
 }> = []
 
@@ -13,7 +11,6 @@ let connectGate: Promise<void> | null = null
 
 vi.mock('@/hermes', () => ({
   HermesGateway: class {
-    private replayGapHandler: ((gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void) | null = null
     connectionState = 'closed'
     connect = vi.fn(async () => {
       if (this.connectionState === 'connecting') {
@@ -37,17 +34,7 @@ vi.mock('@/hermes', () => ({
     })
     close = vi.fn()
     onEvent = vi.fn(() => () => {})
-    onReplayGap = vi.fn((handler: (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }) => void) => {
-      this.replayGapHandler = handler
-
-      return () => {
-        this.replayGapHandler = null
-      }
-    })
     onState = vi.fn(() => () => {})
-    emitReplayGap = (gap: { reason: 'epoch-changed' | 'truncated'; sessionIds: string[] }): void => {
-      this.replayGapHandler?.(gap)
-    }
 
     constructor() {
       secondaryGateways.push(this)
@@ -67,12 +54,9 @@ const {
   gatewayActivationEpoch,
   disposeSecondariesForConnection,
   openGatewayForAgent,
-  primaryGatewayProfileKey,
   pruneSecondaryGateways,
   requestGatewayForAgent,
   requestGatewayForProfile,
-  replayGapMatchesActiveGateway,
-  replayGapRecoveryStillCurrent,
   retainGatewayForAgent,
   setPrimaryGateway,
   setPrimaryGatewayConnection
@@ -490,131 +474,6 @@ describe('requestGatewayForAgent', () => {
   })
 })
 
-describe('replay-gap source ownership and HMR migration', () => {
-  function installRegistryDesktop() {
-    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
-      getConnection: vi.fn(async (profile: null | string) => ({ port: 4242, profile, token: 't' })),
-      getConnectionFor: vi.fn(async ({ connectionId, profile }) => ({ connectionId, port: 5151, profile })),
-      getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }) => ({
-        ok: true as const,
-        wsUrl: `ws://${connectionId}/${profile}`
-      })),
-      touchBackend: vi.fn(async () => undefined)
-    }
-  }
-
-  it('tags pooled gaps with their exact source and matches only the active route', async () => {
-    const onReplayGap = vi.fn()
-    const primary = makePrimary()
-
-    setPrimaryGateway(primary as never, 'default')
-    setPrimaryGatewayConnection({ connectionId: 'source-a' })
-    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap })
-    installRegistryDesktop()
-    await ensureGatewayForAgent('source-b', 'worker')
-
-    secondaryGateways[0].emitReplayGap({ reason: 'epoch-changed', sessionIds: ['runtime-collision'] })
-
-    const scopedGap = {
-      connectionId: 'source-b',
-      profile: 'worker',
-      reason: 'epoch-changed' as const,
-      sessionIds: ['runtime-collision']
-    }
-
-    expect(onReplayGap).toHaveBeenCalledWith(scopedGap)
-
-    expect(replayGapMatchesActiveGateway(scopedGap)).toBe(true)
-    expect(replayGapMatchesActiveGateway({ ...scopedGap, connectionId: 'source-a' })).toBe(false)
-  })
-
-  it('uses the adopted non-default primary profile for callback-time gap scoping', async () => {
-    const primary = makePrimary()
-
-    setPrimaryGateway(primary as never, 'default')
-    setPrimaryGateway(primary as never, 'worker')
-    setPrimaryGatewayConnection({ connectionId: 'shared-source' })
-    installRegistryDesktop()
-    await ensureGatewayForAgent('shared-source', 'worker')
-
-    expect(primaryGatewayProfileKey()).toBe('worker')
-    expect(
-      replayGapMatchesActiveGateway({
-        connectionId: 'shared-source',
-        profile: primaryGatewayProfileKey(),
-        reason: 'truncated',
-        sessionIds: ['runtime-collision']
-      })
-    ).toBe(true)
-    expect(
-      replayGapMatchesActiveGateway({
-        connectionId: 'shared-source',
-        profile: 'default',
-        reason: 'truncated',
-        sessionIds: ['runtime-collision']
-      })
-    ).toBe(false)
-  })
-
-  it('invalidates replay-gap recovery when the active source generation changes', async () => {
-    const primary = makePrimary()
-
-    setPrimaryGateway(primary as never, 'default')
-    setPrimaryGatewayConnection({ connectionId: 'source-a' })
-    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap: vi.fn() })
-    installRegistryDesktop()
-    await ensureGatewayForAgent('source-b', 'worker')
-
-    const gap = {
-      connectionId: 'source-b',
-      profile: 'worker',
-      reason: 'epoch-changed' as const,
-      sessionIds: ['runtime-collision']
-    }
-
-    const acceptedEpoch = gatewayActivationEpoch()
-
-    expect(replayGapRecoveryStillCurrent(gap, acceptedEpoch)).toBe(true)
-
-    await ensureGatewayForAgent('source-c', 'other')
-
-    expect(replayGapRecoveryStillCurrent(gap, acceptedEpoch)).toBe(false)
-  })
-
-  it('upgrades and safely disposes an HMR-preserved pre-gap secondary shape', async () => {
-    const primary = makePrimary()
-
-    setPrimaryGateway(primary as never, 'default')
-    installRegistryDesktop()
-    await openGatewayForAgent('source-b', 'worker', { activationLease: true })
-
-    const state = (
-      globalThis as unknown as {
-        [key: symbol]: {
-          secondaries: Map<
-            string,
-            { gateway: { onReplayGap: ReturnType<typeof vi.fn> }; offReplayGap?: () => void }
-          >
-        }
-      }
-    )[Symbol.for('hermes.desktop.gatewayRegistryState')]
-
-    const entry = [...state.secondaries.values()][0]
-
-    entry.offReplayGap?.()
-    delete entry.offReplayGap
-    const onReplayGap = vi.fn()
-    configureGatewayRegistry({ onEvent: vi.fn(), onReplayGap })
-
-    expect(entry.gateway.onReplayGap).toHaveBeenCalledTimes(2)
-
-    delete entry.offReplayGap
-
-    expect(() => closeSecondaryGateways()).not.toThrow()
-    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
-  })
-})
-
 describe('retainGatewayForAgent (#93602)', () => {
   function installRegistryDesktop() {
     ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
@@ -703,5 +562,119 @@ describe('retainGatewayForAgent (#93602)', () => {
 
     release()
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+})
+
+describe('attached shared-remote group turns (#96493)', () => {
+  function installAttachedSharedRemote() {
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getConnection: vi.fn(async (profile: null | string) => ({ port: 4242, profile, token: 't' })),
+      getConnectionFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+        connectionId,
+        port: 9119,
+        profile,
+        sharedRemote: true
+      })),
+      getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+        ok: true as const,
+        wsUrl: `ws://${connectionId}/${profile}`
+      })),
+      touchBackend: vi.fn(async () => undefined)
+    }
+  }
+
+  it('reuses the primary socket for a named profile on the attached shared remote', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    installAttachedSharedRemote()
+    await ensureGatewayForProfile('default')
+
+    const release = await retainGatewayForAgent('homelab', 'voter')
+    await requestGatewayForAgent('homelab', 'voter', 'session.create', { title: 'Group: room' })
+    await requestGatewayForAgent('homelab', 'voter', 'prompt.submit', { session_id: 'rt-1', text: 'hi' })
+
+    expect(secondaryGateways).toHaveLength(0)
+    expect(primary.request).toHaveBeenCalledTimes(2)
+    expect(primary.request).toHaveBeenNthCalledWith(1, 'session.create', {
+      title: 'Group: room',
+      profile: 'voter'
+    })
+    expect(primary.request).toHaveBeenNthCalledWith(2, 'prompt.submit', {
+      session_id: 'rt-1',
+      text: 'hi',
+      profile: 'voter'
+    })
+
+    release()
+    expect(secondaryGateways).toHaveLength(0)
+  })
+
+  it('still dials a secondary when the attached source is not a shared remote', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getConnection: vi.fn(async (profile: null | string) => ({ port: 4242, profile, token: 't' })),
+      getConnectionFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+        connectionId,
+        port: 5151,
+        profile,
+        sharedRemote: false
+      })),
+      getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+        ok: true as const,
+        wsUrl: `ws://${connectionId}/${profile}`
+      })),
+      touchBackend: vi.fn(async () => undefined)
+    }
+    await ensureGatewayForProfile('default')
+
+    await requestGatewayForAgent('homelab', 'voter', 'session.create', { title: 'g' })
+
+    expect(secondaryGateways).toHaveLength(1)
+    expect(primary.request).not.toHaveBeenCalled()
+  })
+
+  it('reuses the primary when the shared-remote probe fails instead of dialing a ghost secondary', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getConnection: vi.fn(async (profile: null | string) => ({ port: 4242, profile, token: 't' })),
+      getConnectionFor: vi.fn(async () => {
+        throw new Error('Timed out connecting to profile "voter"')
+      }),
+      getGatewayWsUrlFor: vi.fn(async () => ({ ok: true as const, wsUrl: 'ws://homelab/voter' })),
+      touchBackend: vi.fn(async () => undefined)
+    }
+    await ensureGatewayForProfile('default')
+
+    await requestGatewayForAgent('homelab', 'voter', 'session.create', { title: 'g' })
+
+    expect(secondaryGateways).toHaveLength(0)
+    expect(primary.request).toHaveBeenCalledOnce()
+  })
+
+  it('openGatewayForAgent and ensureGatewayForAgent do not dial a secondary', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    installAttachedSharedRemote()
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('homelab', 'voter')
+    expect(await ensureGatewayForAgent('homelab', 'voter')).toBe(true)
+    expect(secondaryGateways).toHaveLength(0)
+  })
+
+  it('ensureGatewayForAgent is false when the attached primary socket is closed', async () => {
+    const primary = { connectionState: 'closed', request: vi.fn() }
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    installAttachedSharedRemote()
+
+    expect(await ensureGatewayForAgent('homelab', 'voter')).toBe(false)
+    expect(secondaryGateways).toHaveLength(0)
   })
 })

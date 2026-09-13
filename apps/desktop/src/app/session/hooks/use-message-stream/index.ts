@@ -23,12 +23,12 @@ import {
   generatedImageEchoSources,
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
-import { parseTodos } from '@/lib/todos'
+import { isTodoToolName, nextTodosFromToolEvent, parseTodoRevision } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { upsertSubagent } from '@/store/subagents'
-import { setSessionTodos } from '@/store/todos'
+import { $todosBySession, setSessionTodos } from '@/store/todos'
 
 import type { ClientSessionState } from '../../../types'
 
@@ -118,7 +118,6 @@ export function useMessageStream({
                 parts: seed(),
                 timestamp: occurredAt,
                 pending: true,
-                ...(state.liveTurnId ? { liveTurnId: state.liveTurnId } : {}),
                 branchGroupId: groupId
               }
             ]
@@ -462,11 +461,11 @@ export function useMessageStream({
 
       // The composer status stack owns todo display now (no inline panel) —
       // mirror every todo state the tool reports into its session store.
-      if (payload?.name === 'todo') {
-        const todos = parseTodos(payload.todos) ?? parseTodos(payload.result) ?? parseTodos(payload.args)
+      if (payload && isTodoToolName(payload.name)) {
+        const todos = nextTodosFromToolEvent($todosBySession.get()[sessionId] ?? [], payload)
 
         if (todos) {
-          setSessionTodos(sessionId, todos)
+          setSessionTodos(sessionId, todos, parseTodoRevision(payload))
         }
       }
 
@@ -493,29 +492,16 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (
-      sessionId: string,
-      text: string,
-      segmentId?: string,
-      alreadyStreamed = true,
-      occurredAt = Date.now() / 1000
-    ) => {
+    (sessionId: string, text: string, occurredAt = Date.now() / 1000) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
         }
 
         const authoritativeText = renderMediaTags(text).trim()
-        const stableId = segmentId?.trim() ? `assistant-interim-${segmentId.trim()}` : ''
 
         if (!authoritativeText) {
           return state
-        }
-
-        if (stableId && state.messages.some(message => message.id === stableId)) {
-          return state.interimBoundaryPending
-            ? state
-            : { ...state, interimBoundaryPending: true, sawAssistantPayload: true }
         }
 
         const streamId = state.streamId
@@ -527,39 +513,27 @@ export function useMessageStream({
         }
 
         let nextMessages = state.messages
-        const streamMessage = streamId ? nextMessages.find(message => message.id === streamId) : undefined
 
-        if (streamId && streamMessage && alreadyStreamed) {
-          nextMessages = nextMessages.map(message =>
-            message.id === streamId
+        if (streamId && nextMessages.some(m => m.id === streamId)) {
+          // Seal the streaming bubble in place, marked interim so it renders
+          // without an action footer (see ChatMessage.interim).
+          nextMessages = nextMessages.map(m =>
+            m.id === streamId
               ? {
-                  ...message,
-                  id: stableId || message.id,
-                  parts: completeOpenTimelineParts(replaceTextPart(message.parts), occurredAt),
+                  ...m,
+                  parts: completeOpenTimelineParts(replaceTextPart(m.parts), occurredAt),
                   completedAt: occurredAt,
                   pending: false,
                   interim: true
                 }
-              : message
+              : m
           )
         } else {
-          if (streamId && streamMessage) {
-            nextMessages = nextMessages.map(message =>
-              message.id === streamId
-                ? {
-                    ...message,
-                    parts: completeOpenTimelineParts(message.parts, occurredAt),
-                    completedAt: occurredAt,
-                    pending: false
-                  }
-                : message
-            )
-          }
-
+          // No streaming bubble — create a standalone interim message
           nextMessages = [
             ...nextMessages,
             {
-              id: stableId || nextStreamMessageId('assistant-interim'),
+              id: nextStreamMessageId('assistant-interim'),
               role: 'assistant' as const,
               parts: [{ ...assistantTextPart(authoritativeText, occurredAt), completedAt: occurredAt }],
               timestamp: occurredAt,
@@ -686,57 +660,56 @@ export function useMessageStream({
           if (fallbackIndex >= 0) {
             const index = prev.length - 1 - fallbackIndex
             const existing = prev[index]
+            const existingText = chatMessageText(existing).trim()
 
             // The last assistant row is a sealed interim (a tool-call turn or a
             // verify-on-stop candidate — `message.interim` fires for BOTH, see
             // tui_gateway `_load_interim_assistant_messages`). When the final
             // completion is the SAME turn's reply, settle it onto that interim
-            // instead of appending a second bubble. Turn state and stable IDs,
-            // never presentation text, establish that ownership.
+            // instead of appending a second bubble. Continuity, not exact
+            // equality: streaming can drop characters and the final may add a
+            // trailing delta, so treat prefix-either-way as the same message.
             // (mergeFinalAssistantText, via completeMessage, does the real
             // text merge — replaces the interim's text with the full final.)
-            const sameLiveTurn = Boolean(
-              existing.liveTurnId && state.liveTurnId && existing.liveTurnId === state.liveTurnId
-            )
-            const conflictingLiveTurns = Boolean(
-              existing.liveTurnId && state.liveTurnId && existing.liveTurnId !== state.liveTurnId
-            )
-            const finalTargetsPendingRow = Boolean(existing.pending && !conflictingLiveTurns)
-            const finalTargetsPreSteerAssistant = Boolean(
-              !conflictingLiveTurns &&
-              existing.id.startsWith('assistant-stream-') &&
-              prev.slice(index + 1).length > 0 &&
-              prev.slice(index + 1).every(message => message.role === 'user' && message.midTurnCorrection)
-            )
-            const finalTargetsPreviewedInterim = Boolean(
-              responsePreviewed &&
+            const finalContinuesInterim = Boolean(
               existing.interim &&
-              !conflictingLiveTurns &&
-              (interimBoundaryPending || sameLiveTurn)
+              finalText &&
+              existingText &&
+              (finalText === existingText || finalText.startsWith(existingText) || existingText.startsWith(finalText))
             )
 
-            if (finalTargetsPendingRow || finalTargetsPreSteerAssistant) {
+            if (existing.pending || (!interimBoundaryPending && finalText && existingText === finalText)) {
               nextMessages = prev.map((message, messageIndex) =>
                 messageIndex === index ? completeMessage(message) : message
               )
-            } else if (finalTargetsPreviewedInterim) {
+            } else if ((interimBoundaryPending && responsePreviewed) || finalContinuesInterim) {
               // Settle the interim in place instead of creating a duplicate —
-              // response_previewed proves that the exact pending verification
-              // candidate was reused as the final response. Boundary state or
-              // equal stable turn identity ties that preview to this row.
+              // the DB has one row, so the live UI must agree. Two distinct
+              // settle paths with different boundary requirements:
               //
-              // Equal liveTurnId survives a message.start reset of the boundary
-              // flag (#74560) without inferring identity from text.
+              // • responsePreviewed covers the verify-on-stop continuation-
+              //   budget case, where the final may be a rewrite sharing no
+              //   prefix with the interim. Because there is no continuity
+              //   guarantee, it must stay gated on the session's
+              //   `interimBoundaryPending` flag: after a new `message.start`
+              //   resets the flag, a previewed final is a DISTINCT reply and
+              //   must append its own bubble, never overwrite the interim
+              //   (otherwise interim('old') → message.start →
+              //   complete({response_previewed: true, text: 'new'}) would
+              //   silently destroy 'old').
+              //
+              // • finalContinuesInterim (prefix-either-way continuity, same
+              //   text or one a prefix of the other) is safe to settle
+              //   flag-free: continuity can only hold for the SAME message,
+              //   so a `message.start` reset landing between this turn's
+              //   `message.interim` and `message.complete` must not force an
+              //   append of a duplicate bubble (#74560). This also closes the
+              //   non-previewed tool-call gap from #63679.
               nextMessages = prev.map((message, messageIndex) =>
                 messageIndex === index ? completeMessage(message) : message
               )
             } else if (finalText) {
               nextMessages = [...prev, newAssistantFromCompletion()]
-              // A non-previewed completion following an interim is ambiguous:
-              // it may be a distinct final answer or the persisted form of the
-              // interim. Keep both locally and let canonical stored history
-              // reconcile them; never guess from exact or prefix-related text.
-              shouldHydrate = Boolean(existing.interim)
             }
           } else if (finalText) {
             nextMessages = [...prev, newAssistantFromCompletion()]
@@ -752,15 +725,33 @@ export function useMessageStream({
         const hasInlineError = nextMessages.some(m => m.role === 'assistant' && m.error && !m.hidden)
         const lastVisible = [...nextMessages].reverse().find(m => !m.hidden)
         const unresolvedUserTail = lastVisible?.role === 'user'
+
+        const sameTurnAssistant = streamId
+          ? nextMessages.find(m => m.id === streamId)
+          : [...nextMessages].reverse().find(m => m.role === 'assistant' && !m.hidden)
+
+        const localVisibleText = sameTurnAssistant ? chatMessageText(sameTurnAssistant).trim() : ''
         // Having streamed the reply normally means this window owns the whole
         // turn and re-reading stored history would be wasted work. That only
         // holds for a turn it STARTED: an adopted one (resumed onto a session
         // already running elsewhere) arrives reply-first, with no prompt row,
         // so it has to hydrate or the user's own message never shows up.
-        shouldHydrate ||=
+        // Adopted turns still hydrate so a resume-onto-running session can
+        // pick up the user's prompt row — unless this window already has
+        // visible assistant text and the terminal frame is empty. In that
+        // case hydrate would replace the live bubble with a stored empty
+        // row (#95514; adoptedRunningTurn must not short-circuit).
+        shouldHydrate =
           !completionError &&
           !hasInlineError &&
-          !unresolvedUserTail &&
+          // A visible user message with no reply after the terminal frame
+          // means this window never rendered the turn's output. When the
+          // frame also carries no text, the reply only exists in stored
+          // history — hydrate to catch up instead of leaving the transcript
+          // blank until restart (#88036). A non-empty frame still settles
+          // locally, so the user-tail guard keeps applying there.
+          (!unresolvedUserTail || !finalText) &&
+          !(localVisibleText && !finalText) &&
           (state.adoptedRunningTurn || !state.sawAssistantPayload || !finalText)
 
         return {

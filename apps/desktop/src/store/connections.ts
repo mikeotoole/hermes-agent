@@ -8,7 +8,6 @@ import {
   beginGatewaySwitch,
   endGatewaySwitch,
   type GatewaySwitchToken,
-  isCurrentGatewaySwitch,
   recoverActiveSourceAfterFailedGatewaySwitch
 } from '@/store/gateway-switch'
 import {
@@ -372,12 +371,10 @@ export async function selectConnection(connectionId: string, options: SelectConn
               return false
             }
 
-            if (token == null) {
-              token = beginGatewaySwitch()
-              markActivationStarted()
-            }
+            token = beginGatewaySwitch()
+            markActivationStarted()
 
-            return isCurrentGatewaySwitch(token)
+            return true
           }
         })
 

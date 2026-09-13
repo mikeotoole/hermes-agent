@@ -36,7 +36,6 @@ export function createClientSessionState(
     busy: false,
     awaitingResponse: false,
     streamId: null,
-    liveTurnId: null,
     sawAssistantPayload: false,
     adoptedRunningTurn: false,
     pendingBranchGroup: null,
@@ -460,7 +459,7 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       role,
       content: [textPart(text)],
       createdAt,
-      metadata: { custom: timelineMeta }
+      metadata: { custom: { ...timelineMeta, ...(message.asyncResult ? { asyncResult: message.asyncResult } : {}) } }
     } as ThreadMessage
   }
 

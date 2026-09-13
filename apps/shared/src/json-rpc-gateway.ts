@@ -14,6 +14,7 @@ export type GatewayEventName =
   | 'tool.progress'
   | 'tool.complete'
   | 'tool.generating'
+  | 'todo.updated'
   | 'clarify.request'
   | 'approval.request'
   | 'sudo.request'
@@ -32,11 +33,6 @@ export interface GatewayEvent<P = unknown> {
   connectionId?: string
   session_id?: string
   type: GatewayEventName
-}
-
-export interface ReplayGap {
-  reason: 'epoch-changed' | 'truncated'
-  sessionIds: string[]
 }
 
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error'
@@ -104,6 +100,19 @@ const DEFAULT_HEARTBEAT_DEADLINE_MS = 45_000
 // handshake doesn't land in this window, fail to 'error' so callers can retry.
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 
+/** True for a `ws://` / `wss://` URL string — the only thing `JsonRpcGatewayClient.connect()` will dial. */
+export function isGatewayWebSocketUrl(value: unknown): value is string {
+  if (typeof value !== 'string') {return false}
+
+  try {
+    const protocol = new URL(value).protocol
+
+    return protocol === 'ws:' || protocol === 'wss:'
+  } catch {
+    return false
+  }
+}
+
 export class JsonRpcGatewayClient {
   private nextId = 0
   private pending = new Map<GatewayRequestId, PendingCall>()
@@ -132,10 +141,7 @@ export class JsonRpcGatewayClient {
    * silently believe nothing was missed.
    */
   private replayEpoch: string | null = null
-  /** Recovery gaps discovered while replay owns live-frame ordering. */
-  private pendingReplayGaps = new Map<ReplayGap['reason'], Set<string>>()
   private readonly eventHandlers = new Map<string, Set<(event: GatewayEvent) => void>>()
-  private readonly replayGapHandlers = new Set<(gap: ReplayGap) => void>()
   private readonly stateHandlers = new Set<(state: ConnectionState) => void>()
   private readonly options: Required<Omit<GatewayClientOptions, 'socketFactory'>> &
     Pick<GatewayClientOptions, 'socketFactory'>
@@ -169,19 +175,7 @@ export class JsonRpcGatewayClient {
       return new Error(`gateway connect() requires a ws:// or wss:// URL string, got ${got}`)
     }
 
-    if (typeof wsUrl !== 'string') {
-      throw invalidUrl()
-    }
-
-    let url: URL
-
-    try {
-      url = new URL(wsUrl)
-    } catch {
-      throw invalidUrl()
-    }
-
-    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    if (!isGatewayWebSocketUrl(wsUrl)) {
       throw invalidUrl()
     }
 
@@ -341,12 +335,6 @@ export class JsonRpcGatewayClient {
     return this.onAny(handler)
   }
 
-  onReplayGap(handler: (gap: ReplayGap) => void): () => void {
-    this.replayGapHandlers.add(handler)
-
-    return () => this.replayGapHandlers.delete(handler)
-  }
-
   onState(handler: (state: ConnectionState) => void): () => void {
     this.stateHandlers.add(handler)
     handler(this.state)
@@ -488,11 +476,7 @@ export class JsonRpcGatewayClient {
         const epoch = (frame.params.payload as { replay_epoch?: unknown } | undefined)?.replay_epoch
 
         if (typeof epoch === 'string' && epoch) {
-          const invalidatedSessionIds = this.adoptReplayEpoch(epoch)
-
-          if (invalidatedSessionIds.length) {
-            this.deferOrReportReplayGap({ reason: 'epoch-changed', sessionIds: invalidatedSessionIds })
-          }
+          this.adoptReplayEpoch(epoch)
         }
       }
 
@@ -548,7 +532,6 @@ export class JsonRpcGatewayClient {
       return
     }
 
-    this.pendingReplayGaps.clear()
     this.replayInFlight = true
     // Park live frames for the sessions we're about to replay so a frame
     // racing the replay response can't dispatch ahead of (or duplicate) the
@@ -575,33 +558,24 @@ export class JsonRpcGatewayClient {
         )
       )
 
-      for (const [index, result] of results.entries()) {
+      for (const result of results) {
         if (result.status !== 'fulfilled' || !Array.isArray(result.value?.events)) {
           continue
         }
 
         const epoch = (result.value as { epoch?: unknown }).epoch
-        const sid = entries[index][0]
 
         if (typeof epoch === 'string' && epoch && this.replayEpoch && epoch !== this.replayEpoch) {
           // Backend restarted: its seq numbering reset, so our watermarks —
           // and this replay window — are meaningless. Drop them and start
           // fresh under the new epoch.
           this.adoptReplayEpoch(epoch)
-          this.deferOrReportReplayGap({
-            reason: 'epoch-changed',
-            sessionIds: entries.map(([entrySid]) => entrySid)
-          })
 
           continue
         }
 
         if (typeof epoch === 'string' && epoch && !this.replayEpoch) {
           this.replayEpoch = epoch
-        }
-
-        if ((result.value as { truncated?: unknown }).truncated === true) {
-          this.deferOrReportReplayGap({ reason: 'truncated', sessionIds: [sid] })
         }
 
         for (const event of result.value.events) {
@@ -617,17 +591,6 @@ export class JsonRpcGatewayClient {
     } finally {
       this.flushReplayHold()
       this.replayInFlight = false
-
-      if (this.pendingReplayGaps.has('epoch-changed')) {
-        this.pendingReplayGaps.delete('truncated')
-      }
-
-      const pendingGaps = [...this.pendingReplayGaps]
-      this.pendingReplayGaps.clear()
-
-      for (const [reason, sessionIds] of pendingGaps) {
-        this.reportReplayGap({ reason, sessionIds: [...sessionIds] })
-      }
     }
   }
 
@@ -657,42 +620,16 @@ export class JsonRpcGatewayClient {
    * seq watermarks describe a numbering that no longer exists — clear them
    * so the next reconnect doesn't silently believe it missed nothing.
    */
-  private adoptReplayEpoch(epoch: string): string[] {
+  private adoptReplayEpoch(epoch: string): void {
     if (this.replayEpoch === epoch) {
-      return []
+      return
     }
-
-    const invalidatedSessionIds = this.replayEpoch !== null ? [...this.lastSeenSeq.keys()] : []
 
     if (this.replayEpoch !== null) {
       this.lastSeenSeq.clear()
     }
 
     this.replayEpoch = epoch
-
-    return invalidatedSessionIds
-  }
-
-  private reportReplayGap(gap: ReplayGap): void {
-    for (const handler of this.replayGapHandlers) {
-      handler(gap)
-    }
-  }
-
-  private deferOrReportReplayGap(gap: ReplayGap): void {
-    if (!this.replayInFlight) {
-      this.reportReplayGap(gap)
-
-      return
-    }
-
-    const sessionIds = this.pendingReplayGaps.get(gap.reason) ?? new Set<string>()
-
-    for (const sessionId of gap.sessionIds) {
-      sessionIds.add(sessionId)
-    }
-
-    this.pendingReplayGaps.set(gap.reason, sessionIds)
   }
 
   /** Release frames parked during a replay fetch, seq-gated against dupes. */
