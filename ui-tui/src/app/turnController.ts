@@ -137,6 +137,7 @@ class TurnController {
   private streamTimer: Timer = null
   private streamDelay = STREAM_IDLE_BATCH_MS
   private toolProgressTimer: Timer = null
+  private interimSegmentIds = new Set<string>()
 
   // ── Credits notice machinery (Strategy B) ───────────────────────────
   //
@@ -699,7 +700,7 @@ class TurnController {
     }
   }
 
-  recordInterimMessage(text: string) {
+  recordInterimMessage(text: string, segmentId?: string, alreadyStreamed = true) {
     if (this.interrupted) {
       return
     }
@@ -710,10 +711,21 @@ class TurnController {
       return
     }
 
+    const stableId = segmentId?.trim() ?? ''
+
+    if (stableId && this.interimSegmentIds.has(stableId)) {
+      return
+    }
+
+
+    if (!alreadyStreamed && this.bufRef.trimStart()) {
+      this.flushStreamingSegment()
+    }
+
     // If the streaming buffer hasn't caught up to the authoritative interim
     // text (e.g. the backend didn't stream every token), sync it so the
     // sealed segment matches what the user should see.
-    if (this.bufRef.trimStart() !== authoritativeText) {
+    if (!alreadyStreamed || this.bufRef.trimStart() !== authoritativeText) {
       this.bufRef = authoritativeText
     }
 
@@ -723,6 +735,26 @@ class TurnController {
     // interimBoundaryIndex marks it as interim-sealed.
     this.flushStreamingSegment()
     this.interimBoundaryIndex = this.segmentMessages.length
+
+    if (stableId) {
+      this.interimSegmentIds.add(stableId)
+    }
+  }
+
+  recordCorrectionMessage(text: string) {
+    if (this.interrupted) {
+      return
+    }
+
+    const correction = text.trim()
+
+    if (!correction) {
+      return
+    }
+
+    this.flushStreamingSegment()
+    this.pushSegment({ role: 'user', text: correction })
+    patchTurnState({ streamSegments: this.segmentMessages })
   }
 
   recordReasoningAvailable(text: string, force = false) {
@@ -940,6 +972,7 @@ class TurnController {
     this.protocolWarned = false
     this.reasoningSegmentIndex = null
     this.interimBoundaryIndex = null
+    this.interimSegmentIds.clear()
     this.segmentMessages = []
     this.turnTools = []
     this.toolTokenAcc = 0
@@ -990,6 +1023,15 @@ class TurnController {
     patchTurnState({ streaming: boundedLiveRenderText(visible) })
   }
 
+  resetHydratedInflight() {
+    this.streamTimer = clear(this.streamTimer)
+    this.bufRef = ''
+    this.interimBoundaryIndex = null
+    this.interimSegmentIds.clear()
+    this.segmentMessages = []
+    patchTurnState({ streamSegments: [], streaming: '' })
+  }
+
   startMessage() {
     this.endReasoningPhase()
     this.clearReasoning()
@@ -997,6 +1039,7 @@ class TurnController {
     this.activeReasoningText = ''
     this.reasoningSegmentIndex = null
     this.interimBoundaryIndex = null
+    this.interimSegmentIds.clear()
     this.turnTools = []
     this.toolTokenAcc = 0
     this.interrupted = false

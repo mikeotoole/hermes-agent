@@ -336,15 +336,50 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     return True
 
 
+def _interim_boundaries(turn: dict) -> list[dict]:
+    """Sanitized interim-commentary boundaries for a resume snapshot.
+
+    Each boundary records where a commentary segment landed in the assistant
+    stream (``assistant_offset``, UTF-16 code units) and the order it arrived in
+    (``arrival_sequence``), so a resuming client can interleave commentary and
+    corrections by arrival rather than guessing from text alone.
+    """
+    raw_interim = turn.get("interim")
+    if not isinstance(raw_interim, list):
+        return []
+    boundaries: list[dict] = []
+    for raw in raw_interim:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get("segment_id") or "").strip()
+        text = str(raw.get("text") or "")
+        if not segment_id or not text:
+            continue
+        boundary = {"already_streamed": bool(raw.get("already_streamed")), "segment_id": segment_id, "text": text}
+        for key in ("assistant_offset", "arrival_sequence"):
+            value = raw.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                boundary[key] = value
+        boundaries.append(boundary)
+    return boundaries
+
+
 def _inflight_snapshot(session: dict) -> dict | None:
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
         return None
     user, assistant = str(turn.get("user") or "").strip(), str(turn.get("assistant") or "")
     streaming, error = bool(turn.get("streaming")), str(turn.get("error") or "").strip()
-    if not (user or assistant or streaming or error):
+    interim = _interim_boundaries(turn)
+    if not (user or assistant or streaming or error or interim):
         return None
     snapshot = {"assistant": assistant, "streaming": streaming, "user": user}
+    # turn_id binds a resuming client's live projection to the exact accepted turn.
+    turn_id = str(turn.get("turn_id") or "").strip()
+    if turn_id:
+        snapshot["turn_id"] = turn_id
+    if interim:
+        snapshot["interim"] = interim
     raw_offsets = turn.get("correction_offsets") or []
     correction_pairs = [(str(c), raw_offsets[i] if i < len(raw_offsets) else None)
                         for i, c in enumerate(turn.get("corrections") or []) if str(c).strip()]
@@ -354,6 +389,28 @@ def _inflight_snapshot(session: dict) -> dict | None:
         snapshot["corrections"] = [c for c, _ in correction_pairs]
         if all(isinstance(offset, int) and offset >= 0 for _, offset in correction_pairs):
             snapshot["correction_offsets"] = [int(offset) for _, offset in correction_pairs]  # type: ignore[arg-type]
+        # correction_entries pairs each offset with the arrival sequence recorded when the redirect was
+        # accepted, so a resuming client orders concurrent corrections by arrival rather than by offset
+        # alone (equal offsets are legal when two redirects land between the same two deltas).
+        raw_entries = turn.get("correction_entries")
+        if isinstance(raw_entries, list):
+            entries = [
+                {
+                    "arrival_sequence": int(entry["arrival_sequence"]),
+                    "assistant_offset": int(entry["assistant_offset"]),
+                    "text": str(entry.get("text") or ""),
+                }
+                for entry in raw_entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("arrival_sequence"), int)
+                and not isinstance(entry.get("arrival_sequence"), bool)
+                and entry["arrival_sequence"] >= 0
+                and isinstance(entry.get("assistant_offset"), int)
+                and not isinstance(entry.get("assistant_offset"), bool)
+                and entry["assistant_offset"] >= 0
+            ]
+            if entries and len(entries) == len(correction_pairs):
+                snapshot["correction_entries"] = entries
     if error:
         # Retained failed turn (_fail_inflight_turn): a resuming client must rebuild the failed bubble, not render the
         # partial text as a healthy reply.

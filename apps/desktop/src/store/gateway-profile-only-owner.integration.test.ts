@@ -130,7 +130,9 @@ afterEach(() => {
 
 describe('profile-only secondary approval ownership', () => {
   it('keeps a profile-only secondary event owner across a focus switch and dispatches approval on that secondary', async () => {
-    await expect(ensureGatewayForProfile('research')).resolves.toBeUndefined()
+    // ensureGatewayForProfile resolves true once the activation is published
+    // (downstream signals activation success so a revoked continuation can bail).
+    await expect(ensureGatewayForProfile('research')).resolves.toBe(true)
     const secondary = gatewayMocks.instances[0]
 
     expect(secondary).toBeTruthy()
@@ -139,7 +141,7 @@ describe('profile-only secondary approval ownership', () => {
     expect($sessionStates.get()).toEqual({})
 
     secondary.emit({ session_id: 'rt-secondary', type: 'approval.request' })
-    await expect(ensureGatewayForProfile('default')).resolves.toBeUndefined()
+    await expect(ensureGatewayForProfile('default')).resolves.toBe(true)
 
     expect(knownOwnerForSession('rt-secondary')).toBe('research')
 

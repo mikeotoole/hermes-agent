@@ -16,6 +16,7 @@ import {
 import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
+  chatMessageText,
   preserveLocalAssistantErrors,
   restorePendingClarifyToolCall,
   settlePendingClarifyToolCall,
@@ -257,24 +258,72 @@ function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?
 function reconcileAuthoritativeChatMessages(
   authoritativeMessages: ChatMessage[],
   previousMessages: ChatMessage[],
-  liveProjection?: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>
+  liveProjection?: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>,
+  preserveUnboundPending = false
 ): ChatMessage[] {
-  const withLiveProjection = liveProjection
-    ? appendLiveSessionProjection(authoritativeMessages, liveProjection)
-    : authoritativeMessages
+  const projectedTurnId = liveProjection?.inflight?.turn_id?.trim()
+  // A session id identifies a conversation, not one accepted turn. Older
+  // gateways omit turn_id; leave those projections deliberately unbound so a
+  // repeated prompt cannot be consumed as though it were the prior turn.
+  const liveTurnId = projectedTurnId && !projectedTurnId.startsWith('legacy:') ? projectedTurnId : undefined
+  const identityProjection =
+    liveProjection?.inflight && liveTurnId
+      ? { ...liveProjection, inflight: { ...liveProjection.inflight, turn_id: liveTurnId } }
+      : liveProjection
+  const latestPreviousUserIndex = previousMessages.map(message => message.role).lastIndexOf('user')
+  const latestPreviousUser = previousMessages[latestPreviousUserIndex]
+  const provenPreviousTailStart =
+    liveTurnId &&
+    latestPreviousUser?.id.startsWith('user-') &&
+    chatMessageText(latestPreviousUser) === liveProjection?.inflight?.user
+      ? latestPreviousUserIndex
+      : -1
+  const previousWithLiveIdentity = liveTurnId
+    ? previousMessages.map((message, index) =>
+        index >= provenPreviousTailStart &&
+        provenPreviousTailStart >= 0 &&
+        !message.liveTurnId &&
+        ((index === provenPreviousTailStart && message.role === 'user') ||
+          (index > provenPreviousTailStart && message.role === 'assistant' && message.id.startsWith('assistant-stream-')))
+          ? { ...message, liveTurnId }
+          : message
+      )
+    : previousMessages
+  const latestAuthoritative = authoritativeMessages[authoritativeMessages.length - 1]
+  const authoritativeWithLiveIdentity =
+    liveTurnId &&
+    latestAuthoritative?.role === 'user' &&
+    chatMessageText(latestAuthoritative) === liveProjection?.inflight?.user
+      ? authoritativeMessages.map((message, index) =>
+          index === authoritativeMessages.length - 1 && !message.liveTurnId
+            ? { ...message, liveTurnId }
+            : message
+        )
+      : authoritativeMessages
+  const withLiveProjection = identityProjection
+    ? appendLiveSessionProjection(authoritativeWithLiveIdentity, identityProjection)
+    : authoritativeWithLiveIdentity
 
-  const reconciled = reconcileResumeMessages(withLiveProjection, previousMessages)
-  const withPendingTurn = preserveLocalPendingTurnMessages(reconciled, previousMessages)
+  const reconciled = reconcileResumeMessages(withLiveProjection, previousWithLiveIdentity)
+  const withPendingTurn = identityProjection?.inflight || preserveUnboundPending
+    ? preserveLocalPendingTurnMessages(reconciled, previousWithLiveIdentity)
+    : reconciled
 
-  return preserveLocalAssistantErrors(withPendingTurn, previousMessages)
+  return preserveLocalAssistantErrors(withPendingTurn, previousWithLiveIdentity)
 }
 
 function reconcileAuthoritativeMessages(
   authoritativeMessages: SessionResumeResponse['messages'],
   previousMessages: ChatMessage[],
-  liveProjection?: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>
+  liveProjection?: Pick<SessionResumeResponse, 'inflight' | 'queued' | 'session_id'>,
+  preserveUnboundPending = false
 ): ChatMessage[] {
-  return reconcileAuthoritativeChatMessages(toChatMessages(authoritativeMessages), previousMessages, liveProjection)
+  return reconcileAuthoritativeChatMessages(
+    toChatMessages(authoritativeMessages),
+    previousMessages,
+    liveProjection,
+    preserveUnboundPending
+  )
 }
 
 // `session.create` params from the current profile + sticky-UI model/effort/fast,
@@ -878,7 +927,12 @@ export function useSessionActions({
   }, [navigate, selectedStoredSessionId])
 
   const resumeSession = useCallback(
-    async (storedSessionId: string, replaceRoute = false, capturedOwner?: SessionProfileRoute) => {
+    async (
+      storedSessionId: string,
+      replaceRoute = false,
+      capturedOwner?: SessionProfileRoute,
+      isContinuationCurrent?: () => boolean
+    ) => {
       // Delete/archive tombstones the durable id before the route flips, and
       // requestSessionResume already refuses to queue for a doomed id. This is
       // the actuator-side half of the same rule: a resume that was queued
@@ -894,7 +948,9 @@ export function useSessionActions({
       const resumeStartMessages = resumedSameSelectedSession ? $messages.get() : []
 
       const isCurrentResume = () =>
-        resumeRequestRef.current === requestId && selectedStoredSessionIdRef.current === storedSessionId
+        resumeRequestRef.current === requestId &&
+        selectedStoredSessionIdRef.current === storedSessionId &&
+        (isContinuationCurrent?.() ?? true)
 
       // Paint the click before the profile-resolve / gateway-swap awaits below,
       // so there's zero dead air: highlight the row instantly (the sidebar reads
@@ -993,7 +1049,7 @@ export function useSessionActions({
       const storedForProfile = await resolveStoredSession(storedSessionId, ownerRoute)
       const sessionProfile = storedForProfile?.profile
 
-      if (resumeRequestRef.current !== requestId) {
+      if (!isCurrentResume()) {
         return
       }
 
@@ -1024,9 +1080,15 @@ export function useSessionActions({
           await openGatewayForProfile(normalizeProfileKey(sessionProfile), { spawnPriority: 'foreground' })
         }
       } else if (resolvedConnectionId) {
-        await ensureGatewayAgent(resolvedConnectionId, ownerRoute?.profile || sessionProfile || 'default')
+        await ensureGatewayAgent(resolvedConnectionId, ownerRoute?.profile || sessionProfile || 'default', {
+          beforeActivate: isCurrentResume
+        })
       } else {
-        await ensureGatewayProfile(sessionProfile)
+        await ensureGatewayProfile(sessionProfile, { beforeActivate: isCurrentResume })
+      }
+
+      if (!isCurrentResume()) {
+        return
       }
 
       // Request-time routing guard for every session-scoped RPC below. The
@@ -1176,6 +1238,10 @@ export function useSessionActions({
               // event transport to this newly-opened WebSocket.
               if (!isMissingRpcMethod(error)) {
                 throw error
+              }
+
+              if (!isCurrentResume()) {
+                return
               }
 
               const usage = await requestForSession<UsageStats>('session.usage', { session_id: cachedRuntimeId })
@@ -1620,7 +1686,12 @@ export function useSessionActions({
           )
 
           prefetchedTranscriptMessages = graftedPrefetch
-          localSnapshot = reconcileAuthoritativeChatMessages(graftedPrefetch, previousMessages)
+          // This paint happens BEFORE `session.resume` settles (upstream moved it
+          // ahead of the await), so the turn's running state is not yet known.
+          // Preserve unbound pending messages here: an optimistic user row sent
+          // during a reconnect must survive the persisted-transcript paint, and
+          // the post-resume reconcile below re-runs with the real projection.
+          localSnapshot = reconcileAuthoritativeChatMessages(graftedPrefetch, previousMessages, undefined, true)
           prefetchApplied = true
           prefetchedStoredSessionId = prefetchedResult.session_id || storedSessionId
 
@@ -1693,7 +1764,12 @@ export function useSessionActions({
             ? preserveLocalPendingTurnMessages(currentMessages, resumeStartMessages)
             : currentMessages
 
-          const resumedMessages = reconcileAuthoritativeMessages(resumed.messages, previousMessages, resumed)
+          const resumedMessages = reconcileAuthoritativeMessages(
+            resumed.messages,
+            previousMessages,
+            resumed,
+            resumed.running !== false
+          )
 
           return chatMessageArraysEquivalent(currentMessages, resumedMessages) ? currentMessages : resumedMessages
         })()

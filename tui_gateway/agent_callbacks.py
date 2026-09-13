@@ -121,9 +121,37 @@ def _agent_cbs(sid: str) -> dict:
     # Interim assistant commentary (text alongside tool calls), gated on display.interim_assistant_
     # messages; _run_prompt_submit overwrites it per turn and clears it so a stale closure can't fire.
     if _load_interim_assistant_messages():
-        callbacks["interim_assistant_callback"] = lambda text, *, already_streamed=False: _emit(
-            "message.interim", sid, {"text": str(text), "already_streamed": bool(already_streamed)})
+        callbacks["interim_assistant_callback"] = lambda text, *, already_streamed=False: _on_interim_assistant(
+            sid, text, already_streamed=already_streamed)
     return callbacks
+
+
+def _on_interim_assistant(sid: str, text: Any, *, already_streamed: bool = False) -> None:
+    """Emit interim commentary AND record its boundary on the live turn.
+
+    The emit alone is enough for a client that watched the stream live. A client
+    that reconnects mid-turn only has the resume snapshot, so the segment must
+    also be recorded with the assistant offset it landed at (UTF-16 code units)
+    and its arrival sequence — otherwise commentary reappears at the top of the
+    reply instead of where it was actually said.
+    """
+    payload = {"already_streamed": bool(already_streamed), "segment_id": uuid.uuid4().hex, "text": str(text)}
+    session = _sessions.get(sid)
+    lock = session.get("history_lock") if session is not None else None
+    if lock is not None:
+        with lock:
+            turn = session.get("inflight_turn")
+            if isinstance(turn, dict):
+                boundary = dict(payload)
+                boundary["arrival_sequence"] = _next_inflight_arrival_sequence(turn)
+                boundary["assistant_offset"] = _utf16_code_units(str(turn.get("assistant") or ""))
+                interim = turn.get("interim")
+                if not isinstance(interim, list):
+                    interim = []
+                    turn["interim"] = interim
+                interim.append(boundary)
+                turn["updated_at"] = time.time()
+    _emit("message.interim", sid, payload)
 
 
 def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:

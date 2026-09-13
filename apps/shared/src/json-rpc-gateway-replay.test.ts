@@ -289,8 +289,41 @@ describe('JsonRpcGatewayClient event-seq tracking + replay resume', () => {
     client.close()
   })
 
+  it('reports a truncated replay so the application can hydrate authoritative session state', async () => {
+    const client = makeClient()
+    const gaps: unknown[] = []
+    client.onReplayGap(gap => gaps.push(gap))
+
+    const first = client.connect('ws://x')
+    let sock = sockets[sockets.length - 1]
+    sock.open()
+    await first
+    sock.serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.delta', session_id: 's1', seq: 9 } })
+
+    client.invalidate('drop')
+    const second = client.connect('ws://x')
+    sock = sockets[sockets.length - 1]
+    sock.open()
+    await second
+
+    await vi.waitFor(() => expect(sock.lastRequest().method).toBe('session.events.since'))
+    const req = sock.lastRequest()
+    sock.serverFrame({
+      jsonrpc: '2.0',
+      id: req.id,
+      result: { events: [], latest_seq: 20, truncated: true, count: 0, epoch: 'epoch-A' }
+    })
+
+    await vi.waitFor(() => {
+      expect(gaps).toEqual([{ reason: 'truncated', sessionIds: ['s1'] }])
+    })
+    client.close()
+  })
+
   it('clears stale watermarks when the backend epoch changes (restart poisoning)', async () => {
     const client = makeClient()
+    const gaps: unknown[] = []
+    client.onReplayGap(gap => gaps.push(gap))
 
     const first = client.connect('ws://x')
     let sock = sockets[sockets.length - 1]
@@ -326,11 +359,70 @@ describe('JsonRpcGatewayClient event-seq tracking + replay resume', () => {
 
     await vi.waitFor(() => {
       expect(client.getSeqWatermarks()).toEqual({})
+      expect(gaps).toEqual([{ reason: 'epoch-changed', sessionIds: ['s1'] }])
     })
 
     // New-epoch events build fresh watermarks from scratch.
     sock.serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.delta', session_id: 's1', seq: 3 } })
     expect(client.getSeqWatermarks()).toEqual({ s1: 3 })
+    client.close()
+  })
+
+  it('reports an epoch gap when gateway.ready announces the restart before replay resolves', async () => {
+    const client = makeClient()
+    const gaps: unknown[] = []
+    const recoveryOrder: string[] = []
+    client.on('message.delta', event => {
+      if ((event as { seq?: number }).seq === 1) {
+        recoveryOrder.push('parked-live')
+      }
+    })
+    client.onReplayGap(gap => {
+      gaps.push(gap)
+      recoveryOrder.push('gap')
+    })
+
+    const first = client.connect('ws://x')
+    let sock = sockets[sockets.length - 1]
+    sock.open()
+    await first
+    sock.serverFrame({
+      jsonrpc: '2.0',
+      method: 'event',
+      params: { type: 'gateway.ready', payload: { replay_epoch: 'epoch-A' } }
+    })
+    sock.serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.delta', session_id: 's1', seq: 97 } })
+
+    client.invalidate('drop')
+    const second = client.connect('ws://x')
+    sock = sockets[sockets.length - 1]
+    sock.open()
+    await second
+    await vi.waitFor(() => expect(sock.lastRequest().method).toBe('session.events.since'))
+
+    // Real gateways send gateway.ready as soon as the socket opens. The
+    // restart signal must not disappear merely because it beats the replay
+    // response carrying the same epoch.
+    sock.serverFrame({
+      jsonrpc: '2.0',
+      method: 'event',
+      params: { type: 'gateway.ready', payload: { replay_epoch: 'epoch-B' } }
+    })
+    sock.serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.delta', session_id: 's1', seq: 1 } })
+    expect(gaps).toEqual([])
+    expect(recoveryOrder).toEqual([])
+
+    const req = sock.lastRequest()
+    sock.serverFrame({
+      jsonrpc: '2.0',
+      id: req.id,
+      result: { events: [], latest_seq: 0, truncated: false, count: 0, epoch: 'epoch-B' }
+    })
+
+    await vi.waitFor(() => {
+      expect(gaps).toEqual([{ reason: 'epoch-changed', sessionIds: ['s1'] }])
+      expect(recoveryOrder).toEqual(['parked-live', 'gap'])
+    })
     client.close()
   })
 })

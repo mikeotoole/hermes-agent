@@ -264,9 +264,33 @@ def _inflight_text(value: Any) -> str:
     return _content_display_text(value).strip()
 
 
-def _start_inflight_turn(session: dict, text: Any) -> None:
+def _utf16_code_units(text: str) -> int:
+    """Return the string length used by JavaScript slice offsets.
+
+    Renderer clients slice by UTF-16 code units; Python ``len()`` counts code
+    points, so an emoji or other astral character ahead of a correction shifts
+    every later boundary and misplaces the bubble.
+    """
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _next_inflight_arrival_sequence(turn: dict[str, Any]) -> int:
+    raw_sequence = turn.get("arrival_sequence")
+    sequence = raw_sequence if isinstance(raw_sequence, int) and raw_sequence >= 0 else 0
+    turn["arrival_sequence"] = sequence + 1
+    return sequence
+
+
+def _start_inflight_turn(session: dict, text: Any, *, turn_id: str | None = None) -> None:
     now = time.time()
-    session["inflight_turn"] = {"assistant": "", "started_at": now, "streaming": True, "updated_at": now, "user": _inflight_text(text)}
+    # turn_id identifies the accepted turn (not the conversation): a resuming client
+    # binds a live projection to the exact turn it started, so a repeated prompt is
+    # never consumed as though it were the previous one.
+    session["inflight_turn"] = {
+        "assistant": "", "started_at": now, "streaming": True,
+        "turn_id": str(turn_id or "").strip() or uuid.uuid4().hex,
+        "updated_at": now, "user": _inflight_text(text),
+    }
 
 
 def _append_inflight_delta(session: dict, delta: Any) -> None:
@@ -275,7 +299,7 @@ def _append_inflight_delta(session: dict, delta: Any) -> None:
         return
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
-        turn = {"assistant": "", "streaming": True, "user": ""}
+        turn = {"assistant": "", "streaming": True, "turn_id": uuid.uuid4().hex, "user": ""}
     turn.update(assistant=f"{turn.get('assistant') or ''}{text}", streaming=True, updated_at=time.time())
     session["inflight_turn"] = turn
 
@@ -288,10 +312,18 @@ def _record_inflight_correction(session: dict, text: Any) -> None:
     if not correction or not isinstance(turn, dict):
         return
     # correction_offsets: arrival-order boundary (assistant chars already streamed) so resuming clients
-    # place the bubble between the output seen and the output redirected.
+    # place the bubble between the output seen and the output redirected. Offsets are UTF-16 code units
+    # because the renderer slices that way; correction_entries pairs each offset with its arrival
+    # sequence so concurrent corrections keep a stable order.
     turn = dict(turn)
+    assistant_offset = _utf16_code_units(str(turn.get("assistant") or ""))
+    arrival_sequence = _next_inflight_arrival_sequence(turn)
     turn["corrections"] = [*(turn.get("corrections") or []), correction]
-    turn["correction_offsets"] = [*(turn.get("correction_offsets") or []), len(str(turn.get("assistant") or ""))]
+    turn["correction_offsets"] = [*(turn.get("correction_offsets") or []), assistant_offset]
+    turn["correction_entries"] = [
+        *(turn.get("correction_entries") or []),
+        {"arrival_sequence": arrival_sequence, "assistant_offset": assistant_offset, "text": text},
+    ]
     turn["updated_at"] = time.time()
     session["inflight_turn"] = turn
 

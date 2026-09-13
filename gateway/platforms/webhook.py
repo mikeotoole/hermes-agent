@@ -525,9 +525,30 @@ class WebhookAdapter(BasePlatformAdapter):
         if payload is _UNPARSEABLE:
             return _json_error("Cannot parse body", 400)
         headers = request.headers
-        event_type = (headers.get("X-GitHub-Event", "") or headers.get("X-GitLab-Event", "")
-                      or payload.get("event_type", "") or payload.get("type", "") or "unknown")
+        # Check event type filter. Gitea can send a normalized event in the
+        # compatibility headers while carrying the exact trigger in the
+        # corresponding Event-Type headers (for example, approval reviews).
+        normalized_event_type = (headers.get("X-GitHub-Event", "") or headers.get("X-Gitea-Event", "")
+                                 or headers.get("X-GitLab-Event", "")
+                                 or payload.get("event_type", "") or payload.get("type", "") or "unknown")
+        event_type_candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for candidate in (
+                    headers.get("X-Gitea-Event-Type", ""),
+                    headers.get("X-GitHub-Event-Type", ""),
+                    normalized_event_type,
+                )
+                if candidate
+            )
+        )
         allowed_events = route_config.get("events", [])
+        event_type = normalized_event_type
+        if allowed_events:
+            event_type = next(
+                (candidate for candidate in event_type_candidates if candidate in allowed_events),
+                normalized_event_type,
+            )
         if allowed_events and event_type not in allowed_events:
             logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)", event_type, route_name,
                          allowed_events)

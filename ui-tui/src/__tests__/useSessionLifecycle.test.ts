@@ -68,6 +68,141 @@ describe('live session activation in-flight state', () => {
     expect(getTurnState().streaming).toBe('partial answer')
   })
 
+  it('hydrates stable interim boundaries and leaves only the unsealed tail streaming', () => {
+    hydrateLiveSessionInflight({
+      assistant: 'streamed checkpointremaining answer',
+      streaming: true,
+      user: 'current prompt',
+      interim: [
+        {
+          already_streamed: true,
+          assistant_offset: 'streamed checkpoint'.length,
+          segment_id: 'stable-1',
+          text: 'streamed checkpoint'
+        },
+        {
+          already_streamed: false,
+          assistant_offset: 'streamed checkpoint'.length,
+          segment_id: 'stable-2',
+          text: 'tool-call commentary'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+      'streamed checkpoint',
+      'tool-call commentary'
+    ])
+    expect(turnController.bufRef).toBe('remaining answer')
+    expect(getTurnState().streaming).toBe('remaining answer')
+  })
+
+  it('hydrates an exact commentary boundary without losing ordinary streamed text', () => {
+    const prefix = 'ordinary answerhello   there'
+
+    hydrateLiveSessionInflight({
+      assistant: `${prefix}remaining answer`,
+      streaming: true,
+      interim: [
+        {
+          already_streamed: true,
+          assistant_offset: prefix.length,
+          segment_id: 'stable-normalized',
+          text: 'hello   there'
+        }
+      ]
+    })
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual([
+      'ordinary answer',
+      'hello   there'
+    ])
+    expect(getTurnState().streaming).toBe('remaining answer')
+  })
+
+  it('does not duplicate a hydrated interim when replay delivers the same stable id', () => {
+    hydrateLiveSessionInflight({
+      assistant: 'streamed checkpointremaining answer',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: true,
+          assistant_offset: 'streamed checkpoint'.length,
+          segment_id: 'stable-1',
+          text: 'streamed checkpoint'
+        }
+      ]
+    })
+
+    turnController.recordInterimMessage('streamed checkpoint', 'stable-1', true)
+
+    expect(getTurnState().streamSegments.map(message => message.text)).toEqual(['streamed checkpoint'])
+    expect(turnController.bufRef).toBe('remaining answer')
+    expect(getTurnState().streaming).toBe('remaining answer')
+  })
+
+  it('restores same-offset interims and corrections in gateway arrival order', () => {
+    const inflight = {
+      assistant: 'draft',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: false,
+          arrival_sequence: 0,
+          assistant_offset: 5,
+          segment_id: 'stable-1',
+          text: 'first commentary'
+        },
+        {
+          already_streamed: false,
+          arrival_sequence: 2,
+          assistant_offset: 5,
+          segment_id: 'stable-2',
+          text: 'second commentary'
+        }
+      ],
+      correction_entries: [{ arrival_sequence: 1, assistant_offset: 5, text: 'redirect' }]
+    } as any
+
+    hydrateLiveSessionInflight(inflight)
+
+    expect(getTurnState().streamSegments.map(message => [message.role, message.text])).toEqual([
+      ['assistant', 'draft'],
+      ['assistant', 'first commentary'],
+      ['user', 'redirect'],
+      ['assistant', 'second commentary']
+    ])
+    expect(getTurnState().streaming).toBe('')
+
+    hydrateLiveSessionInflight(inflight)
+
+    expect(getTurnState().streamSegments.map(message => [message.role, message.text])).toEqual([
+      ['assistant', 'draft'],
+      ['assistant', 'first commentary'],
+      ['user', 'redirect'],
+      ['assistant', 'second commentary']
+    ])
+    expect(getTurnState().streaming).toBe('')
+  })
+  it('rejects offsets that split a UTF-16 surrogate pair', () => {
+    hydrateLiveSessionInflight({
+      assistant: 'A😀B',
+      streaming: true,
+      interim: [
+        {
+          already_streamed: false,
+          assistant_offset: 2,
+          segment_id: 'invalid-surrogate',
+          text: 'must not render'
+        }
+      ],
+      correction_entries: [{ assistant_offset: 2, text: 'must not redirect' }]
+    })
+
+    expect(getTurnState().streamSegments).toEqual([])
+    expect(getTurnState().streaming).toBe('A😀B')
+  })
+
   it('ignores empty in-flight payloads', () => {
     expect(liveSessionInflightMessages({ assistant: '', streaming: false, user: '   ' })).toEqual([])
 
