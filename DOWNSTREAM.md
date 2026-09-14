@@ -6,15 +6,16 @@ new work on the older v0.20.0 downstream source tree.
 
 ## Candidate identity
 
-- Planned downstream release: `lagoon/2026.08.30.1`
-- Product version: Hermes `0.20.6`
-- Upstream tag: `v2026.8.27`
-- Upstream tag object: `fcebd62163497e77e5de00d26d2ed86cb4ef8761`
-- Upstream commit: `5fc308a70719a83cccdbba4c0e39c23f5a8239d5`
-- Upstream tree: `222ec43b5237deb643277bc2f64fa4b873dd7f28`
+- Planned downstream release: `lagoon/2026.09.13.1`
+- Product version: Hermes `0.21.2`
+- Upstream tag: `v2026.9.11`
+- Upstream commit: `939e45c91d751fadd94dcd1b873ac3cb44846213`
+- Upstream tree: `87733a9376625ca99972ef5d9b238024633aaea0`
 - Upstream tag signature: not present; provenance is forge/tag/commit binding
+- Predecessor downstream release: `lagoon/2026.08.30.1` (`f3aa3a59dd3719f330f0f1cbb275d59f8405e855`)
+- Reviewed carried-patch identity: sha256 `47e761dd3219e73f43ab3869ca03e0b908d8612544a2faca0ab6bf815a223a07`,
+  patch-id `0303694cb47cc40640faff1bfc8b898f4edfff32`, 44 paths
 - Candidate release commit: pending approval
-- Accepted combined source tree: `7d96918c92a39a8d7acde38deb97f363ba2669bf`
 - Final packaging tree: recorded after freeze in the external immutable release
   manifest; it is not embedded here because this tracked file contributes to
   that tree

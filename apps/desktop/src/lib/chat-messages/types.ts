@@ -18,6 +18,8 @@ export type ChatMessage = {
   id: string
   role: SessionMessage['role']
   parts: ChatMessagePart[]
+  /** Result body only; the system text remains the compact completion label. */
+  asyncResult?: string
   timestamp?: number
   completedAt?: number
   pending?: boolean
@@ -79,6 +81,7 @@ export type GatewayEventPayload = {
   duration_s?: number
   turn_id?: string
   todos?: unknown
+  revision?: number
   model?: string
   provider?: string
   reasoning_effort?: string
@@ -101,6 +104,8 @@ export type GatewayEventPayload = {
   // clarify.request
   request_id?: string
   question?: string
+  // btw.complete / background.complete — id of the side/background task
+  task_id?: string
   choices?: string[] | null
   multi_select?: boolean
   // clarify.request batch form: questions replaces question/choices, and
@@ -120,6 +125,13 @@ export type GatewayEventPayload = {
   // secret.request (skill credential capture)
   env_var?: string
   prompt?: string
+  // vault.unlock.request (external password-manager unlock)
+  backend?: string
+  display_name?: string
+  /** vault.save_login.request / vault.code.request */
+  origin?: string
+  site?: string
+  hint?: string
   // terminal.read.request / preview.read.request (GUI agent reading the
   // in-app terminal pane or the browser/preview pane)
   start?: number
@@ -132,7 +144,10 @@ export type GatewayEventPayload = {
   preset?: string
   // tour.request (tour tool — agent-guided driver.js walkthrough). `action`
   // and `steps` name the tour verb and step list; `surface` picks the app's
-  // own DOM vs the preview pane's guest page.
+  // own DOM vs the preview pane's guest page. tip.show (tip tool — one accent
+  // bubble with an arrow, no overlay) adds no fields of its own: it reuses
+  // `selector`/`side` here plus `text`/`title`, and carries no request_id
+  // because a tip is fire-and-forget.
   surface?: string
   selector?: string
   side?: string
