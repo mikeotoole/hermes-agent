@@ -520,8 +520,11 @@ def _invoke_agent(
 
     # Interim assistant text (commentary beside tool calls, pre-nudge final answer) is sealed
     # by the desktop as its own segment instead of being lost to message.complete.
+    # Routes through _on_interim_assistant (NOT a bare _emit): this per-turn assignment
+    # overwrites the one _agent_cbs installs, so emitting directly here would leave the
+    # inflight turn with no recorded boundary and break reconnect ordering.
     def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-        _emit("message.interim", sid, {"text": text, "already_streamed": already_streamed})
+        _on_interim_assistant(sid, text, already_streamed=already_streamed)
     agent.interim_assistant_callback = (
         _interim_assistant_cb if _load_interim_assistant_messages() else None)
     # A synthesized turn is typed at turn START so a crash persist writes a timeline event,
@@ -805,7 +808,10 @@ def _run_prompt_submit(
         "kind=%s chars=%s images=%d",
         sid, session.get("session_key") or "", getattr(agent, "session_id", "") or "",
         display_kind or "user", len(text) if isinstance(text, str) else "-", len(images))
-    _emit("message.start", sid)
+    # turn_id rides message.start so a resuming client can bind its live projection to the
+    # exact accepted turn rather than to the conversation (a repeated prompt must not be
+    # consumed as though it were the previous turn).
+    _emit("message.start", sid, {"turn_id": str((session.get("inflight_turn") or {}).get("turn_id") or "")})
 
     def run():
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport

@@ -53,9 +53,15 @@ def _compute_host_turn_frame(
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
+        # The inflight turn's id must ride the frame so the compute host adopts the SAME
+        # turn identity the in-process path uses; without it the child re-mints a different
+        # id and a resuming client cannot bind its projection to the turn actually running.
+        inflight = session.get("inflight_turn")
+        inflight_turn_id = str(inflight.get("turn_id") or "") if isinstance(inflight, dict) else ""
         attached_images = list(image_paths if image_paths is not None else session.get("attached_images", []))
     return {
         "type": "turn.start", "sid": sid, "request_id": rid,
+        "inflight_turn_id": inflight_turn_id,
         "session_key": session.get("session_key") or sid, "text": text,
         **({"display_kind": display_kind} if display_kind else {}), "history": history,
         "history_version": history_version, "cols": int(session.get("cols", 80) or 80),

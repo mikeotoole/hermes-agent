@@ -223,7 +223,10 @@ class ComputeHost:
                     self._reply("turn.error", sid, request_id, message="session busy")
                     return
                 session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
-                server._start_inflight_turn(session, inflight)
+                # Adopt the parent's inflight turn id so the host runs under the SAME turn
+                # identity a resuming client already saw; absent it, _start_inflight_turn
+                # mints a fresh one and the client cannot bind its live projection.
+                server._start_inflight_turn(session, inflight, turn_id=frame.get("inflight_turn_id"))
                 turn_started_at = time.time()
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
